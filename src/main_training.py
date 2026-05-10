@@ -21,9 +21,16 @@ from utils.store_load_run import load_run, save_run
 
 def parse_args(parser: Optional[argparse.ArgumentParser] = None):
     """
-    Parse arguments from command line.
-    :param parser: Optional ArgumentParser instance.
-    :return: Parsed arguments.
+    Parse command line arguments for training configuration.
+    
+    Parses configuration file path and optional training parameters like wandb logging,
+    plotting, model saving/loading paths, and S1 filter learning mode.
+    
+    Args:
+        parser (Optional[argparse.ArgumentParser]): Optional custom ArgumentParser instance.
+    
+    Returns:
+        argparse.Namespace: Parsed command line arguments.
     """
     if parser is None:
         parser = argparse.ArgumentParser(description="Lateral Connections Stage 1")
@@ -53,6 +60,12 @@ def parse_args(parser: Optional[argparse.ArgumentParser] = None):
                         dest='run:load_state_path',
                         help='Path from where the model will be loaded'
                         )
+    parser.add_argument('--learn_s1',
+                        action='store_true',
+                        default=False,
+                        dest='feature_extractor:learn_s1',
+                        help='Whether to learn the S1 filters (instead of using fixed filters)'
+                        )
     # parser.add_argument('--ts',
     #                     type=int,
     #                     default=5,
@@ -66,8 +79,16 @@ def parse_args(parser: Optional[argparse.ArgumentParser] = None):
 
 def configure(parser: Optional[argparse.ArgumentParser] = None) -> Dict[str, Optional[Any]]:
     """
-    Load the config based on the given console args.
-    :return: Configuration dict.
+    Load and configure the experiment from command line arguments.
+    
+    Parses arguments, loads configuration file, and sets up PyTorch backend for deterministic training.
+    Warns if CUDA is unavailable for faster training.
+    
+    Args:
+        parser (Optional[argparse.ArgumentParser]): Optional custom ArgumentParser instance.
+    
+    Returns:
+        Dict[str, Optional[Any]]: Complete configuration dictionary.
     """
     args = parse_args(parser)
     config = get_config(args.config, args)
@@ -79,9 +100,16 @@ def configure(parser: Optional[argparse.ArgumentParser] = None) -> Dict[str, Opt
 
 def setup_fabric(config: Dict[str, Optional[Any]]) -> Fabric:
     """
-    Setup the fabric instance.
-    :param config: Configuration dict
-    :return: Fabric instance.
+    Initialize Lightning Fabric for distributed training and acceleration.
+    
+    Creates a Fabric instance with auto-detected accelerator, sets up loggers from config,
+    launches training environment, and seeds random number generators for reproducibility.
+    
+    Args:
+        config (Dict[str, Optional[Any]]): Configuration dictionary.
+    
+    Returns:
+        Fabric: Configured Lightning Fabric instance.
     """
     loggers = loggers_from_conf(config)
     fabric = Fabric(accelerator="auto", devices=1, loggers=loggers, callbacks=[])
@@ -90,10 +118,15 @@ def setup_fabric(config: Dict[str, Optional[Any]]) -> Fabric:
     return fabric
 
 
-def setup_wandb(config: Dict[str, Optional[Any]]):
+def setup_wandb(config: Dict[str, Optional[Any]]) -> None:
     """
-    Setup wandb logging.
-    :param config: The configuration dict
+    Initialize Weights & Biases logging if enabled in configuration.
+    
+    Sets up wandb project, passes full configuration for tracking, and assigns job metadata
+    including job type and experiment group if wandb logging is active.
+    
+    Args:
+        config (Dict[str, Optional[Any]]): Configuration dictionary containing wandb settings.
     """
     if "wandb" in config['logging'].keys() and config['logging']['wandb']['active']:
         wandb_conf = config['logging']['wandb']
@@ -103,12 +136,19 @@ def setup_wandb(config: Dict[str, Optional[Any]]):
                    group=wandb_conf['group'])
 
 
-def setup_dataloader(config: Dict[str, Optional[Any]], fabric: Fabric) -> (DataLoader, DataLoader):
+def setup_dataloader(config: Dict[str, Optional[Any]], fabric: Fabric) -> tuple[DataLoader, DataLoader]:
     """
-    Setup the dataloaders for training and testing.
-    :param config: Configuration dict
-    :param fabric: Fabric instance
-    :return: Returns the training and evaluation dataloader
+    Create and configure dataloaders for training and evaluation.
+    
+    Loads dataloaders from config, then wraps them with Fabric for proper distributed training
+    and device placement.
+    
+    Args:
+        config (Dict[str, Optional[Any]]): Configuration dictionary.
+        fabric (Fabric): Initialized Lightning Fabric instance.
+    
+    Returns:
+        tuple[DataLoader, DataLoader]: Training and evaluation dataloaders.
     """
     train_loader, eval_loader, _ = loaders_from_config(config)
     train_loader = fabric.setup_dataloaders(train_loader)
@@ -118,11 +158,17 @@ def setup_dataloader(config: Dict[str, Optional[Any]], fabric: Fabric) -> (DataL
 
 def setup_feature_extractor(config: Dict[str, Optional[Any]], fabric: Fabric) -> pl.LightningModule:
     """
-    Setup the feature extractor model that is used to extract features from images before they are fed into the model
-    leveraging lateral connections.
-    :param config: Configuration dict
-    :param fabric: Fabric instance
-    :return: Feature extractor model.
+    Initialize the feature extractor model for visual processing.
+    
+    Creates a FixedFilterFeatureExtractor (S1 stage) that extracts features from images
+    before feeding them into the lateral network. Optionally learns S1 filters if enabled in config.
+    
+    Args:
+        config (Dict[str, Optional[Any]]): Configuration dictionary.
+        fabric (Fabric): Initialized Lightning Fabric instance.
+    
+    Returns:
+        pl.LightningModule: Feature extractor model wrapped for training.
     """
     feature_extractor = FixedFilterFeatureExtractor(config, fabric)
     feature_extractor = fabric.setup(feature_extractor)
@@ -136,17 +182,26 @@ def cycle(
         batch: Tensor,
         store_tensors: Optional[bool] = False,
         mode: Optional[str] = "train",
-):
+) -> Optional[tuple[Tensor, Tensor, Tensor, Tensor]]:
     """
-    Perform a single cycle of the model.
-    :param config: Configuration dict
-    :param feature_extractor: The feature extractor model to extract features from a given image.
-    :param lateral_network: The network building sub-networks by using lateral connections
-    :param batch: The images to process.
-    :param store_tensors: Whether to store the tensors and return them.
-    :param mode: The mode of the cycle, either train or eval.
-    :return: The features extracted from the image, the binarized features fed into the network with lateral
-    connections, the features after lateral connections (binary) and the features after lateral connections as float
+    Execute a single forward pass through feature extraction and lateral network processing.
+    
+    Extracts features using the feature extractor, then iteratively processes them through
+    the lateral network across multiple timesteps. Applies Hebbian updates during training.
+    Optionally stores intermediate tensors for visualization and analysis.
+    
+    Args:
+        config (Dict[str, Optional[Any]]): Configuration dictionary.
+        feature_extractor (pl.LightningModule): Feature extractor model.
+        lateral_network (LateralNetwork): Lateral connections network model.
+        batch (Tensor): Input images batch.
+        store_tensors (Optional[bool]): Whether to store and return intermediate tensors. Defaults to False.
+        mode (Optional[str]): Execution mode, either "train" or "eval". Defaults to "train".
+    
+    Returns:
+        Optional[tuple[Tensor, Tensor, Tensor, Tensor]]: When store_tensors=True, returns tuple of
+            (extracted_features, input_features, lateral_features, lateral_features_float).
+            Returns None when store_tensors=False.
     """
     assert mode in ["train", "eval"], "Mode must be either train or eval"
 
@@ -205,15 +260,20 @@ def single_train_epoch(
         lateral_network: LateralNetwork,
         train_loader: DataLoader,
         epoch: int,
-):
+) -> None:
     """
-        Train the model for a single epoch.
-        :param config: Configuration dict.
-        :param feature_extractor: Feature extractor model.
-        :param lateral_network: Laternal network model.
-        :param train_loader: Test set dataloader.
-        :param epoch: Current epoch.
-        """
+    Execute a single training epoch over the full training dataset.
+    
+    Processes all batches through the model in train mode, applying Hebbian weight updates
+    during lateral network processing. Progress is displayed via progress bar.
+    
+    Args:
+        config (Dict[str, Optional[Any]]): Configuration dictionary.
+        feature_extractor (pl.LightningModule): Feature extractor model.
+        lateral_network (LateralNetwork): Lateral network model.
+        train_loader (DataLoader): Training dataset loader.
+        epoch (int): Current epoch number.
+    """
     feature_extractor.eval()
     lateral_network.eval()
     for i, batch in tqdm(enumerate(train_loader),
@@ -229,14 +289,19 @@ def single_eval_epoch(
         lateral_network: LateralNetwork,
         test_loader: DataLoader,
         epoch: int,
-):
+) -> None:
     """
-    Evaluate the model for a single epoch.
-    :param config: Configuration dict.
-    :param feature_extractor: Feature extractor model.
-    :param lateral_network: Laternal network model.
-    :param test_loader: Test set dataloader.
-    :param epoch: Current epoch.
+    Evaluate the model on test set and optionally generate visualizations.
+    
+    Processes test data in eval mode, collects activations, and generates plots if enabled.
+    Logs plots to wandb if configured. Handles conditional plotting based on epoch and config settings.
+    
+    Args:
+        config (Dict[str, Optional[Any]]): Configuration dictionary.
+        feature_extractor (pl.LightningModule): Feature extractor model.
+        lateral_network (LateralNetwork): Lateral network model.
+        test_loader (DataLoader): Test dataset loader.
+        epoch (int): Current epoch number.
     """
     feature_extractor.eval()
     lateral_network.eval()
@@ -263,7 +328,7 @@ def single_eval_epoch(
     wandb_b = config['logging']['wandb']['active']
     store_plots = config['run']['plots'].get('store_path', False)
 
-    assert not wandb_b or wandb_b and store_plots, "Wandb logging requires storing the plots."
+    assert not wandb_b or (wandb_b and store_plots), "Wandb logging requires storing the plots."
 
     if plot:
         if epoch == 0:
@@ -289,14 +354,19 @@ def train(
         lateral_network: LateralNetwork,
         train_loader: DataLoader,
         test_loader: DataLoader,
-):
+) -> None:
     """
-    Train the model.
-    :param config: Configuration dict
-    :param feature_extractor: Feature extractor module
-    :param lateral_network: Lateral network module
-    :param train_loader: Training dataloader
-    :param test_loader: Testing dataloader
+    Main training loop over all epochs.
+    
+    Iterates through specified number of epochs, running training and evaluation phases.
+    Logs metrics and saves checkpoints. Evaluates on initial epoch if plotting or wandb logging enabled.
+    
+    Args:
+        config (Dict[str, Optional[Any]]): Configuration dictionary.
+        feature_extractor (pl.LightningModule): Feature extractor module.
+        lateral_network (LateralNetwork): Lateral network module.
+        train_loader (DataLoader): Training dataset loader.
+        test_loader (DataLoader): Test dataset loader.
     """
     start_epoch = config['run']['current_epoch']
 
@@ -311,19 +381,30 @@ def train(
         config['run']['current_epoch'] = epoch + 1
 
 
-def setup_lateral_network(config, fabric) -> LateralNetwork:
+def setup_lateral_network(config: Dict[str, Optional[Any]], fabric: Fabric) -> LateralNetwork:
     """
-    Setup the model using lateral connections.
-    :param config: Configuration dict
-    :param fabric: Fabric instance
-    :return: Model using lateral connections.
+    Initialize the lateral network model with lateral connections.
+    
+    Creates LateralNetwork instance and wraps it with Fabric for proper device placement
+    and distributed training support.
+    
+    Args:
+        config (Dict[str, Optional[Any]]): Configuration dictionary.
+        fabric (Fabric): Initialized Lightning Fabric instance.
+    
+    Returns:
+        LateralNetwork: Lateral network model wrapped with Fabric.
     """
     return fabric.setup(LateralNetwork(config, fabric))
 
 
-def main():
+def main() -> None:
     """
-    Run the model: Create modules, extract features from images and run the model leveraging lateral connections.
+    Main entry point for the training script.
+    
+    Orchestrates the full training pipeline: loads configuration, initializes Fabric and models,
+    sets up dataloaders, optionally loads checkpoints, and runs training with optional visualization
+    and wandb logging. Saves final model state if configured.
     """
     print_start("Starting python script 'main_lateral_connections.py'...",
                 title="Training S1: Lateral Connections Toy Example")

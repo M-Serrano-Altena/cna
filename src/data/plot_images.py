@@ -10,10 +10,27 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 def undo_norm(img: torch.Tensor, mean: torch.Tensor, std: torch.Tensor):
     """
-    Undo normalization.
-    :param img: Image.
-    :param mean: Mean.
-    :param std: Standard deviation.
+    Undo normalization applied to a tensor image.
+
+    Restores original image pixel values by applying element-wise
+    multiplication with the provided standard deviation and addition
+    of the provided mean. Supports batched tensors (BxCxHxW) and
+    single images (CxHxW or HxW).
+
+    Args:
+        img (torch.Tensor): Input image tensor. Can be 4D (B x C x H x W),
+            3D (C x H x W) or 2D (H x W).
+        mean (torch.Tensor): Per-channel mean tensor of shape (C,) or
+            broadcastable to image channels.
+        std (torch.Tensor): Per-channel standard deviation tensor of shape
+            (C,) or broadcastable to image channels.
+
+    Returns:
+        torch.Tensor: Denormalized image tensor with the same shape as input.
+
+    Raises:
+        AssertionError: If channel dimensions of image, mean and std do not match.
+        ValueError: If input image has unsupported number of dimensions.
     """
     if img.device != mean.device:
         mean = mean.to(img.device)
@@ -35,9 +52,19 @@ def undo_norm(img: torch.Tensor, mean: torch.Tensor, std: torch.Tensor):
 
 def undo_norm_from_conf(img: torch.Tensor, config: Dict[str, Any]):
     """
-    Undo normalization.
-    :param img: Image.
-    :param config: Configuration.
+    Undo normalization using mean and std values from a configuration dict.
+
+    Extracts dataset mean and std from the config under keys
+    config['dataset']['mean'] and config['dataset']['std'] and calls
+    :func:`undo_norm` to denormalize the image tensor.
+
+    Args:
+        img (torch.Tensor): Input image tensor to denormalize.
+        config (Dict[str, Any]): Configuration dictionary containing
+            'dataset' -> 'mean' and 'std'.
+
+    Returns:
+        torch.Tensor: Denormalized image tensor.
     """
     return undo_norm(img, torch.Tensor([config['dataset']['mean']]), torch.Tensor(config['dataset']['std']))
 
@@ -55,26 +82,38 @@ def plot_images(
         mask_vmin: Optional[Union[float, int]] = None,
         mask_vmax: Optional[Union[float, int]] = None,
         plot_colorbar: Optional[bool] = False,
-        cmap: Optional[Union[List[str] | str]] = None,
-        interpolation: Optional[Union[List[str] | str]] = 'none',
+        cmap: Optional[Union[List[str], str]] = None,
+        interpolation: Optional[Union[List[str], str]] = 'none',
 ) -> plt.Figure:
     """
-    Plot images.
-    :param images: A list of images.
-    :param masks: A list of masks that are overlaid on the images.
-    :param titles: A list of titles or labels.
-    :param suptitle: Overall title.
-    :param show_plot: Show plot.
-    :param fig_fp: File path to save figure.
-    :param max_cols: Maximum number of columns.
-    :param vmin: Minimum value of the image.
-    :param vmax: Maximum value of the image.
-    :param mask_vmin: Minimum value of the mask.
-    :param mask_vmax: Maximum value of the mask.
-    :param plot_colorbar: Plot colorbar.
-    :param cmap: Colormap, either a `str` or a `List[str]`.
-    :param interpolation: Interpolation, either a `str` or a `List[str]`.
-    :return: matplotlib Figure.
+    Create a matplotlib figure showing one or more images with optional masks.
+
+    This utility accepts tensors, PIL Images or numpy arrays. It supports
+    batching, optional per-image titles, overlaid masks with a jet colormap,
+    and optional colorbars. Images may be saved to disk or displayed.
+
+    Args:
+        images (List[Any]): List of images (torch.Tensor, PIL.Image or np.ndarray).
+        masks (Optional[List[Any]]): Optional list of masks to overlay on images.
+        titles (Optional[List[Any]]): Optional list of titles or labels for each subplot.
+        suptitle (Optional[str]): Optional overall figure title.
+        show_plot (bool): Whether to call plt.show() before returning the figure.
+        fig_fp (Optional[str]): File path to save the figure image if provided.
+        max_cols (Optional[int]): Maximum number of columns in the grid.
+        vmin (Optional[Union[float, int]]): Minimum display value for image colormap.
+        vmax (Optional[Union[float, int]]): Maximum display value for image colormap.
+        mask_vmin (Optional[Union[float, int]]): Min value for mask colormap scaling.
+        mask_vmax (Optional[Union[float, int]]): Max value for mask colormap scaling.
+        plot_colorbar (Optional[bool]): Whether to draw a colorbar for each image.
+        cmap (Optional[Union[List[str], str]]): Colormap name or list of names per image.
+        interpolation (Optional[Union[List[str], str]]): Interpolation method or list per image.
+
+    Returns:
+        matplotlib.figure.Figure: The created matplotlib Figure instance.
+
+    Raises:
+        AssertionError: If number of images and masks (or titles) do not match when provided.
+        ValueError: If image values fall outside specified vmin/vmax bounds.
     """
     if isinstance(images, torch.Tensor) and len(images.shape) == 4:
         images = [images[i, ...] for i in range(images.shape[0])]
@@ -160,11 +199,20 @@ def show_grid(
         fig_fp: Optional[str] = None
 ) -> plt.Figure:
     """
-    Show a grid of images.
-    :param img_grid: Image grid.
-    :param show_plot: Show plot.
-    :param fig_fp: File path to save figure.
-    :return: Figure.
+    Display one or more image grids generated as torch tensors.
+
+    Converts each provided tensor to a PIL image and arranges them in a
+    single-row subplot. Useful for visualizing torchvision-style image
+    grids produced by utilities such as torchvision.utils.make_grid.
+
+    Args:
+        img_grid (Union[torch.Tensor, List[torch.Tensor]]): Single image grid
+            tensor or list of grid tensors.
+        show_plot (bool): Whether to display the figure with plt.show().
+        fig_fp (Optional[str]): Optional file path to save the figure.
+
+    Returns:
+        matplotlib.figure.Figure: The generated matplotlib Figure.
     """
     if not isinstance(img_grid, list):
         img_grid = [img_grid]
@@ -186,9 +234,19 @@ def show_grid(
 
 def fig_to_img(fig: plt.Figure) -> Image:
     """
-    Convert a matplotlib figure to a PIL image.
-    :param fig: matplotlib figure.
-    :return: PIL image.
+    Convert a matplotlib Figure into a PIL Image.
+
+    Renders the figure canvas to RGB bytes and constructs a PIL Image
+    with shape (height, width, 3).
+
+    Args:
+        fig (matplotlib.figure.Figure): Figure to convert.
+
+    Returns:
+        PIL.Image: The rendered figure as a PIL RGB image.
+
+    Raises:
+        AssertionError: If the provided object is not a matplotlib Figure.
     """
     assert isinstance(fig, plt.Figure), "Input must be a matplotlib figure."
     fig.canvas.draw()

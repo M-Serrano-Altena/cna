@@ -20,10 +20,20 @@ class Conv2dFixedFilters(nn.Module):
 
     def __init__(self, fabric: Fabric, use_larger_weights: Optional[bool] = False, threshold_f: Optional[str] = "None"):
         """
-        Constructor.
-        :param fabric: A Fabric instance.
-        :param use_larger_weights: Whether to use larger weights that sum up to 3 instead of 1.
-        :param threshold_f: Threshold function to use. Can be "None", "threshold" or "bernoulli".
+        Initialize a Conv2dFixedFilters layer with predefined kernels for line detection.
+        
+        This layer contains 4 fixed convolutional filters designed to detect straight lines
+        in four different orientations (vertical, diagonal-right, horizontal, diagonal-left).
+        The filters use either smaller weights (sum to 1.0) or larger weights (sum to 3.0)
+        depending on the use_larger_weights parameter.
+        
+        Args:
+            fabric (Fabric): Lightning Fabric instance for device management.
+            use_larger_weights (Optional[bool]): If True, uses larger filter weights that sum to 3.0.
+                Defaults to False, which uses smaller weights summing to 1.0.
+            threshold_f (Optional[str]): Activation function type to apply after convolution.
+                Can be "None" (ReLU), "threshold" (binary thresholding), or "bernoulli".
+                Defaults to "None".
         """
         super(Conv2dFixedFilters, self).__init__()
         self.threshold_f = threshold_f
@@ -106,18 +116,35 @@ class Conv2dFixedFilters(nn.Module):
 
     def apply_conv(self, x: Tensor) -> Tensor:
         """
-        Performs a 2D convolution with the fixed filters.
-        :param x: Image to perform the convolution on.
-        :return: Extracted features.
+        Apply 2D convolution with fixed line-detection filters to the input.
+        
+        Performs a padded convolution to maintain spatial dimensions, applying all 4 fixed
+        filters to detect lines in different orientations. The output preserves the input
+        spatial resolution through same-padding.
+        
+        Args:
+            x (Tensor): Input image tensor of shape (batch, channels, height, width).
+        
+        Returns:
+            Tensor: Convolved feature maps of shape (batch, 4, height, width).
         """
         x = F.conv2d(x, self.weight, padding="same")
         return x
 
     def apply_activation(self, a: Tensor) -> Tensor:
         """
-        Apply activation function to the features.
-        :param a: Features
-        :return: Activated features
+        Apply the configured activation function to convolved features.
+        
+        Applies one of three activation strategies: ReLU (keep positive values),
+        binary thresholding (convert to 0 or 1), or stochastic Bernoulli sampling.
+        The specific function is determined by the threshold_f parameter set during
+        initialization.
+        
+        Args:
+            a (Tensor): Feature tensor from convolution of shape (batch, filters, height, width).
+        
+        Returns:
+            Tensor: Activated features of the same shape as input.
         """
 
         if self.threshold_f == "None":
@@ -129,9 +156,18 @@ class Conv2dFixedFilters(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
         """
-        Performs a 2D convolution with the fixed filters.
-        :param x: Image to perform the convolution on.
-        :return: Extracted features.
+        Execute the forward pass through the fixed-filter feature extractor.
+        
+        Handles both 4D input (batch, channels, height, width) and 5D input
+        (batch, time_steps, channels, height, width) by applying convolution and
+        activation to each frame independently. 5D inputs are processed sequentially
+        and then recombined along the time dimension.
+        
+        Args:
+            x (Tensor): Input tensor, either 4D or 5D shape.
+        
+        Returns:
+            Tensor: Extracted and activated features with added filter dimension.
         """
         if len(x.shape) == 5:
             result = []
@@ -148,11 +184,18 @@ class FixedFilterFeatureExtractor(pl.LightningModule):
     PyTorch Lightning module that uses a CNN with a fixed filter.
     """
 
-    def __init__(self, conf: Dict[str, Optional[Any]], fabric: Fabric):
+    def __init__(self, conf: Dict[str, Any], fabric: Fabric) -> None:
         """
-        Constructor.
-        :param conf: Configuration dictionary.
-        :param fabric: Fabric instance.
+        Initialize the FixedFilterFeatureExtractor Lightning module.
+        
+        Sets up a Lightning module that wraps the Conv2dFixedFilters layer for
+        feature extraction using predefined fixed convolution kernels. This module
+        integrates with PyTorch Lightning training pipelines.
+        
+        Args:
+            conf (Dict[str, Any]): Configuration dictionary containing model parameters,
+                including nested 'feature_extractor' and 's1_params' keys.
+            fabric (Fabric): Lightning Fabric instance for distributed training and device management.
         """
         super().__init__()
         self.conf = conf
@@ -161,24 +204,46 @@ class FixedFilterFeatureExtractor(pl.LightningModule):
 
     def forward(self, x: Tensor) -> Tensor:
         """
-        Forward pass through the model.
-        :param x: Input image.
-        :return: reconstructed features
+        Forward pass through the fixed-filter feature extraction model.
+        
+        Delegates to the underlying Conv2dFixedFilters model to extract line-detection
+        features from the input image using the fixed convolutional kernels.
+        
+        Args:
+            x (Tensor): Input image tensor.
+        
+        Returns:
+            Tensor: Extracted feature maps from line-detection filters.
         """
         return self.model(x)
 
     def configure_model(self) -> nn.Module:
         """
-           Configures the model.
-           :return: The model.
-           """
+        Create and configure the Conv2dFixedFilters model instance.
+        
+        Instantiates the fixed-filter convolutional layer using parameters from
+        the configuration dictionary, specifically from conf['feature_extractor']['s1_params'].
+        
+        Returns:
+            nn.Module: Configured Conv2dFixedFilters instance ready for feature extraction.
+        """
         return Conv2dFixedFilters(self.fabric, **self.conf['feature_extractor']['s1_params'])
 
     def plot_model_weights(self, show_plot: Optional[bool] = False) -> List[Path]:
         """
-        Plot a histogram of the model weights.
-        :param show_plot: Whether to show the plot.
-        :return: List of paths to the plots.
+        Generate and save visualizations of the model filter weights.
+        
+        Creates comprehensive weight visualizations including a histogram showing
+        the distribution of weight values and a grid visualization of all filter kernels.
+        Plots are saved to disk if a store path is configured, and optionally displayed.
+        
+        Args:
+            show_plot (Optional[bool]): If True, display the plots using matplotlib.
+                Defaults to False.
+        
+        Returns:
+            List[Path]: List of file paths where the generated plots were saved.
+                Returns empty list if no store path is configured.
         """
 
         def _hist_plot(ax, weight, title):
@@ -227,3 +292,4 @@ class FixedFilterFeatureExtractor(pl.LightningModule):
 
             plt.close()
         return files
+

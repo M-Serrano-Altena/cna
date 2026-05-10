@@ -15,19 +15,32 @@ RUN_PATHS = {
 
 
 def limit_support(x: List[float]) -> List[float]:
-    """
-    Limit the support of the lateral connections.
-    :param x: Support per cell
-    :return: Limited lateral connections
+    """Clamp support values to the configured upper bound.
+
+    This mirrors the training-time behavior where support values are limited
+    before being stored or visualized.
+
+    Args:
+        x: Support values per cell.
+
+    Returns:
+        Support values with each entry capped at ``LAMBDA``.
     """
     return [min(x_i, LAMBDA) for x_i in x]
 
 
-def get_support_from_wandb(run_id: str) -> (List[float], List[float], List[float], List[float]):
-    """
-    Get support from wandb.
-    :param run_id: Run ID
-    :return: Tuple of lists of support values
+def get_support_from_wandb(run_id: str) -> tuple[List[float], List[float], List[float], List[float]]:
+    """Fetch support metrics from a Weights & Biases run history.
+
+    The function scans the run history, extracts the relevant support metrics,
+    and clamps them to the same maximum value used during training.
+
+    Args:
+        run_id: Full W&B run path, for example ``"entity/project/run_id"``.
+
+    Returns:
+        A tuple containing the average active support, minimum active support,
+        maximum active support, and average inactive support, in that order.
     """
     # Get the run's history
     api = wandb.Api()
@@ -48,14 +61,28 @@ def get_support_from_wandb(run_id: str) -> (List[float], List[float], List[float
 
     return avg_support_active, min_support_active, max_support_active, avg_support_inactive
 
-def print_support_active_cells(title, min_support_active, max_support_active, avg_support_active, avg_support_inactive):
-    """
-    Plot the support of fragments cells.
-    :param title: Title of the plot
-    :param min_support_active: Min support active cells
-    :param max_support_active: Max support active cells
-    :param avg_support_active: Avg support active cells
-    :param avg_support_inactive: Avg support inactive cells
+def print_support_active_cells(
+    title: str,
+    min_support_active: List[float],
+    max_support_active: List[float],
+    avg_support_active: List[float],
+    avg_support_inactive: List[float],
+) -> None:
+    """Plot support values for active and inactive cells over time.
+
+    The plot shows the mean support for active cells, the min/max range for
+    active cells, and the mean support for inactive cells. It is intended for
+    quick visual inspection of how support evolves across epochs.
+
+    Args:
+        title: Descriptive name of the run or experiment.
+        min_support_active: Minimum support values for active cells.
+        max_support_active: Maximum support values for active cells.
+        avg_support_active: Average support values for active cells.
+        avg_support_inactive: Average support values for inactive cells.
+
+    Returns:
+        None.
     """
 
     # if problems with font, run it on local machine
@@ -78,9 +105,9 @@ def print_support_active_cells(title, min_support_active, max_support_active, av
     plt.legend()
     plt.ylabel("Support Strength")
     plt.xlabel("Epoch")
-    plt.yticks(np.arange(0, X_MAX + 1, 2), np.arange(0, X_MAX + 1, 2))
+    plt.yticks(np.arange(0, X_MAX + 1, 2), list(np.arange(0, X_MAX + 1, 2)))
     d = 2 if len(avg_support_active) <= 50 else 4
-    plt.xticks(np.arange(0, len(avg_support_active) + 1, d), np.arange(0, len(avg_support_active) + 1, d))
+    plt.xticks(np.arange(0, len(avg_support_active) + 1, d), list(np.arange(0, len(avg_support_active) + 1, d)))
     plt.xlim(1, len(avg_support_active))
     plt.ylim(0, X_MAX)
     plt.tight_layout()

@@ -18,15 +18,17 @@ class BaseLitModule(pl.LightningModule):
 
     def __init__(
             self,
-            conf: Dict[str, Optional[Any]],
+            conf: Dict[str, Any],
             fabric: Fabric,
             logging_prefixes: Optional[List[str]] = None,
-    ):
-        """
-        Constructor.
-        :param conf: Configuration dictionary.
-        :param fabric: Fabric instance.
-        :param logging_prefixes: Prefixes for logging.
+    ) -> None:
+        """Initialize the Lightning base module.
+
+        Args:
+            conf (Dict[str, Any]): Configuration dictionary for the module.
+            fabric (Fabric): lightning.fabric Fabric instance used to place tensors/models on devices.
+            logging_prefixes (Optional[List[str]]): Optional list of prefixes used when logging
+                (e.g. ["train", "val"]). If None, defaults to ["train", "val"].
         """
         super().__init__()
         self.conf = conf
@@ -40,12 +42,14 @@ class BaseLitModule(pl.LightningModule):
     def log_step(self,
                  logs: Dict[str, torch.Tensor],
                  prefix: Optional[str] = "",
-                 ):
-        """
-        Log the values and the metrics.
-        :param logs: Values that are already processed and can be logged directly with an average value
-        meter. Must be dictionaries with "meter_key" and "value".
-        :param prefix: Optional prefix for the logging.
+                 ) -> None:
+        """Update internal average meters with values from a training/validation step.
+
+        Args:
+            logs (Dict[str, torch.Tensor]): Mapping from metric name to tensor value to be
+                accumulated in the average meters.
+            prefix (Optional[str]): Optional prefix to prepend to metric names when storing
+                meters (e.g. "train" or "val"). Defaults to empty string.
         """
         for k, v in logs.items():
             meter_name = f"{prefix}/{k}" if prefix != "" else f"{k}"
@@ -54,9 +58,11 @@ class BaseLitModule(pl.LightningModule):
             self.avg_meters[meter_name](v)
 
     def log_(self) -> Dict[str, float]:
-        """
-        Log the metrics.
-        :return: Dictionary of logs.
+        """Aggregate averaged metrics, log them to Lightning and reset meters.
+
+        Returns:
+            Dict[str, float]: A dictionary containing the current epoch and the mean value for
+                each tracked metric.
         """
         logs = {'epoch': self.current_epoch_}
         for m_name, m in self.avg_meters.items():
@@ -69,9 +75,13 @@ class BaseLitModule(pl.LightningModule):
         return logs
 
     def epoch_end(self) -> Dict[str, float]:
-        """
-        Callback at the end of an epoch (log data).
-        :return: Dictionary of logs.
+        """Callback to be called at the end of an epoch.
+
+        This aggregates and logs metrics via the method`log_` and advances the internal epoch
+        counter.
+
+        Returns:
+            Dict[str, float]: The same dictionary returned by the method`log_`.
         """
         logs = self.log_()
         self.current_epoch_ += 1
@@ -83,11 +93,13 @@ class Autoencoder(BaseLitModule):
     Extract features from non-overlapping patches of an image using a VQ-VAE.
     """
 
-    def __init__(self, conf: Dict[str, Optional[Any]], fabric: Fabric):
-        """
-        Constructor.
-        :param conf: Configuration dictionary.
-        :param fabric: Fabric instance.
+    def __init__(self, conf: Dict[str, Any], fabric: Fabric):
+        """Construct the Autoencoder Lightning module.
+
+        Args:
+            conf (Dict[str, Any]): Configuration dictionary containing dataset and
+                optimizer parameters used by the module.
+            fabric (Fabric): Fabric instance used to determine device placement.
         """
         super().__init__(conf, fabric, logging_prefixes=["train", "val"])
         self.model = self.configure_model()
@@ -95,29 +107,47 @@ class Autoencoder(BaseLitModule):
         self.loss_f = nn.MSELoss()
 
     def preprocess_data_(self, batch: Tensor) -> Tuple[Tensor, Tensor]:
-        """
-        Preprocess the data batch.
-        :param batch: Data batch, containing input data and labels.
-        :return: Preprocessed data batch.
+        """Preprocess a training/validation batch before forwarding through the model.
+
+        The default implementation simply unpacks the batch into inputs and targets. Subclasses
+        can override this method to perform normalization, augmentation or other processing.
+
+        Args:
+            batch (Tensor): A batch yielded by the dataloader, typically a tuple of
+                (inputs, targets) or similar.
+
+        Returns:
+            Tuple[Tensor, Tensor]: Tuple containing (inputs, targets).
         """
         x, y = batch
         return x, y
 
     def forward(self, x: Tensor) -> Tensor:
-        """
-        Forward pass through the model.
-        :param x:
-        :return: Loss, reconstructed image, perplexity, and encodings.
+        """Forward pass through the autoencoder model.
+
+        Args:
+            x (Tensor): Input tensor of shape (B, C, H, W).
+
+        Returns:
+            Tensor: Reconstructed tensor produced by the decoder with the same shape as the
+                input (B, C, H, W).
         """
         return self.model(x)
 
     def step(self, batch: Tensor, batch_idx: int, mode_prefix: str) -> Tensor:
-        """
-        Forward step: Forward pass, and logging.
-        :param batch: Data batch, containing input data and labels.
-        :param batch_idx: Index of the batch.
-        :param mode_prefix: Prefix for the mode (train, val, test).
-        :return: Loss of the training step.
+        """Common step logic for training and validation.
+
+        Unpacks and preprocesses the batch, runs a forward pass, computes reconstruction
+        losses and logs several metrics to the internal average meters.
+
+        Args:
+            batch (Tensor): A batch from the dataloader (inputs, targets).
+            batch_idx (int): Index of the current batch within the epoch.
+            mode_prefix (str): Prefix used to separate train/val metrics (e.g. "train" or
+                "val").
+
+        Returns:
+            Tensor: The primary loss tensor used for optimization.
         """
         x, y = self.preprocess_data_(batch)
         x_recon = self.forward(x)
@@ -132,27 +162,34 @@ class Autoencoder(BaseLitModule):
         return loss
 
     def training_step(self, batch: Tensor, batch_idx: int) -> Tensor:
-        """
-        Forward training step: Forward pass, and logging.
-        :param batch: Data batch, containing input data and labels.
-        :param batch_idx: Index of the batch.
-        :return: Loss of the training step.
+        """Training step called by Lightning during training.
+
+        Args:
+            batch (Tensor): A batch from the training dataloader.
+            batch_idx (int): Index of the batch.
+
+        Returns:
+            Tensor: Training loss tensor.
         """
         return self.step(batch, batch_idx, "train")
 
     def validation_step(self, batch: Tensor, batch_idx: int) -> Tensor:
-        """
-        Forward validation step: Forward pass, and logging.
-        :param batch: Data batch, containing input data and labels.
-        :param batch_idx: Index of the batch.
-        :return: Loss of the validation step.
+        """Validation step called by Lightning during validation.
+
+        Args:
+            batch (Tensor): A batch from the validation dataloader.
+            batch_idx (int): Index of the batch.
+
+        Returns:
+            Tensor: Validation loss tensor.
         """
         return self.step(batch, batch_idx, "val")
 
     def configure_model(self):
-        """
-        Configure the model, i.e. create an autoencoder instance.
-        :return:
+        """Create and return the autoencoder neural network.
+
+        Returns:
+            nn.Module: The autoencoder module (encoder + decoder) ready for forward passes.
         """
         return nn.Sequential(
             # Encoder
@@ -186,7 +223,9 @@ class Autoencoder(BaseLitModule):
     def configure_optimizers(self) -> Optimizer:
         """
         Configure (create instance) the optimizer.
-        :return: A torch optimizer and scheduler.
+        
+        Returns:
+            Optimizer: The optimizer instance to be used for training, configured according to the parameters specified in the configuration dictionary.
         """
         opt_conf = self.conf['optimizer']
         return torch.optim.Adam(self.parameters(),

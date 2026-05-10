@@ -1,5 +1,5 @@
 import warnings
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from deepdiff import DeepDiff
 from lightning import Fabric
@@ -8,10 +8,16 @@ from utils.custom_print import print_info
 
 
 def _warn_different_configs(config: Dict[str, Optional[Any]], config_old: Dict[str, Optional[Any]]):
-    """
-    Print a warning if the two configurations differ.
-    :param config: Current configuration
-    :param config_old: Old configuration
+    """Warn when two configuration dictionaries differ in meaningful ways.
+
+    The comparison ignores a small number of expected runtime-specific fields,
+    such as paths and CLI-derived values. If relevant differences are found, a
+    warning is emitted and execution is paused so the user can inspect them.
+
+    Args:
+        config (Dict[str, Optional[Any]]): The current configuration dictionary.
+        config_old (Dict[str, Optional[Any]]): The previously saved
+            configuration dictionary.
     """
     diff = DeepDiff(config_old, config)
     keys_ignored = ["store_state_path", "load_state_path", "current_epoch", "n_epochs",
@@ -42,11 +48,20 @@ def merge_configs(
         config: Dict[str, Optional[Any]],
         config_old: Dict[str, Optional[Any]]
 ) -> Dict[str, Optional[Any]]:
-    """
-    Merge two configurations.
-    :param config: Current configuration
-    :param config_old: Old configuration
-    :return: Configuration dict
+    """Merge a loaded configuration into the active configuration.
+
+    The current configuration is updated with persisted values from the loaded
+    run, while keeping the rest of the current settings intact. This is mainly
+    used to restore stateful runtime fields such as the current epoch.
+
+    Args:
+        config (Dict[str, Optional[Any]]): The active configuration dictionary
+            that will be updated.
+        config_old (Dict[str, Optional[Any]]): The configuration dictionary
+            loaded from the previous run.
+
+    Returns:
+        Dict[str, Optional[Any]]: The merged configuration dictionary.
     """
     #_warn_different_configs(config, config_old)
     config['run']['current_epoch'] = config_old['run']['current_epoch']
@@ -58,12 +73,21 @@ def save_run(
         fabric: Fabric,
         components: Optional[Dict[str, Any]] = None
 ) -> str:
-    """
-    Save the current run.
-    :param config: Configuration dict
-    :param fabric: The fabric
-    :param components: Dict with all components to be saved
-    :return: Path to the saved run
+    """Save the current run state to persistent storage.
+
+    The saved payload always contains the configuration dictionary and can also
+    include additional components such as models, optimizers, or any other
+    serializable run artifacts.
+
+    Args:
+        config (Dict[str, Optional[Any]]): The configuration dictionary to save
+            with the run state.
+        fabric (Fabric): The Lightning Fabric instance responsible for saving.
+        components (Optional[Dict[str, Any]]): Optional extra objects to store
+            together with the configuration.
+
+    Returns:
+        str: The path where the run state was saved.
     """
     state = {
         "config": config,
@@ -78,11 +102,21 @@ def save_run(
 def load_run(
         config: Dict[str, Optional[Any]],
         fabric: Fabric
-) -> (Dict[str, Optional[Any]], Dict[str, Any]):
-    """
-    Load a run.
-    :param fabric: Fabric instance
-    :return: The configuration dict, and a dict with all components
+) -> Tuple[Dict[str, Optional[Any]], Dict[str, Any]]:
+    """Load a saved run and restore its persistent configuration values.
+
+    The stored state is read from disk, the configuration is merged with the
+    currently active one, and any remaining saved components are returned for
+    downstream use.
+
+    Args:
+        config (Dict[str, Optional[Any]]): The current configuration dictionary
+            that will be merged with the loaded configuration.
+        fabric (Fabric): The Lightning Fabric instance responsible for loading.
+
+    Returns:
+        Tuple[Dict[str, Optional[Any]], Dict[str, Any]]: A tuple containing the
+        merged configuration dictionary and the remaining saved components.
     """
     state = fabric.load(config['run']['load_state_path'])
     print_info(f"Loaded run from {config['run']['load_state_path']}", "Run State Loaded")

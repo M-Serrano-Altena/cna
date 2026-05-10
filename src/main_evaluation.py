@@ -20,7 +20,6 @@ from data.spline_line import SplineLine
 from data.straight_line import StraightLine
 from main_autoencoder import setup_autoencoder
 from main_training import configure, setup_fabric, setup_feature_extractor, setup_lateral_network, setup_wandb
-from models.s2_fragments import LateralNetwork
 from utils.custom_print import print_start
 from utils.meters import AverageMeter
 from utils.store_load_run import load_run
@@ -29,10 +28,25 @@ RESULTS_BASE_DIR = Path("results")
 
 
 def parse_args(parser: Optional[argparse.ArgumentParser] = None) -> argparse.ArgumentParser:
-    """
-    Parse arguments from command line.
-    :param parser: Optional ArgumentParser instance.
-    :return: Parsed arguments.
+    """Create and parse command line arguments for model evaluation.
+
+    This function builds an ArgumentParser (unless one is provided), registers
+    all command-line options used by the evaluation script and returns the
+    populated parser. Options include settings for number of samples to
+    evaluate, noise level, line interruption length, line type, evaluation
+    framerate, and paths for storing or loading baseline activations. Several
+    options also map directly to nested configuration keys used elsewhere in
+    the project (for example `lateral_model:s2_params:act_threshold`).
+
+    Args:
+        parser: An optional existing argparse.ArgumentParser instance. If
+            provided, the arguments will be added to it; otherwise a new
+            parser is created.
+
+    Returns:
+        argparse.ArgumentParser: The argument parser with evaluation options
+            configured. The caller can call `parse_args()` on the returned
+            object to obtain the parsed values.
     """
     if parser is None:
         parser = argparse.ArgumentParser(description="Model Evaluation")
@@ -97,8 +111,17 @@ def parse_args(parser: Optional[argparse.ArgumentParser] = None) -> argparse.Arg
 
 def load_models() -> Tuple[Dict[str, Any], Fabric, pl.LightningModule, pl.LightningModule]:
     """
-    Loads the config, fabric, and models
-    :return: Config, fabric, feature extractor, lateral network, l2 network
+    Load configuration, initialize Fabric, and prepare models for evaluation.
+
+    This function parses command-line arguments, creates the training/evaluation
+    Fabric, and instantiates the feature extractor and either a lateral
+    network or an autoencoder depending on the configuration. It then loads
+    model weights from the configured checkpoint, sets the models to
+    evaluation mode, and returns the loaded configuration, Fabric instance,
+    the feature extractor, and the main model.
+
+    Returns:
+        tuple: A tuple containing (config, fabric, feature_extractor, model).
     """
     config = configure(parse_args())
     fabric = setup_fabric(config)
@@ -124,9 +147,18 @@ def load_models() -> Tuple[Dict[str, Any], Fabric, pl.LightningModule, pl.Lightn
 def get_datapoints(n_points) -> List[Tuple[Tuple[int, int], Tuple[int, int]]]:
     def rotate_point_square(p: Tuple[int, int]) -> Tuple[int, int]:
         """
-        Rotates a point ccw along a square trajectory -> required for straight line dataset
-        :param p: Current position
-        :return: Next position
+        Rotate a 2D integer grid point counter-clockwise along a square path.
+
+        The rotation follows a fixed square trajectory used to generate pairs
+        of endpoints for the straight-line dataset. Given the current
+        coordinate, the function computes the next coordinate along the
+        perimeter of a predefined square region.
+
+        Args:
+            p: Current (x, y) integer coordinate.
+
+        Returns:
+            Tuple[int, int]: Next (x, y) coordinate after one CCW step.
         """
         (x, y) = p
         if x == 2:
@@ -159,7 +191,12 @@ def get_datapoints(n_points) -> List[Tuple[Tuple[int, int], Tuple[int, int]]]:
 
 class CustomImage:
     """
-    Custom Image class to draw the current state of the network.
+    Helper to compose visualization images for network activations.
+
+    This class builds a reusable template with static labels and layout and
+    provides methods to convert internal activation tensors into colored
+    masks and heatmaps, then assemble them together with the input image to
+    produce a single visual frame representing the model's internal state.
     """
 
     FONTS_DIR = Path("fonts")
@@ -173,9 +210,17 @@ class CustomImage:
 
     def to_mask(self, mask: np.array) -> np.array:
         """
-        Convert a mask with to an image with 3 channels.
-        :param mask: The mask, np array with shape (c, height, width)
-        :return: The image, np array with shape (height, width, 3)
+        Convert a multi-channel binary mask to an RGB color image.
+
+        Each channel in the input mask is assigned a color from a colormap
+        and blended into a 3-channel (H, W, 3) image. The input is expected
+        in shape (C, H, W) with values in {0,1} or [0,1].
+
+        Args:
+            mask: Numpy array of shape (C, H, W) representing channel masks.
+
+        Returns:
+            np.array: RGB image of shape (H, W, 3) in uint8.
         """
 
         mask_colors = matplotlib.colormaps['gist_rainbow'](range(0, 256, 256 // mask.shape[0]))
@@ -188,9 +233,18 @@ class CustomImage:
 
     def to_heatmap(self, activation_probabilities: np.array) -> np.array:
         """
-        Convert the activation probabilities to a heatmap.
-        :param activation_probabilities: The activation probabilities, np array with shape (c, height, width)
-        :return: The heatmap, np array with shape (height, width, 3)
+        Convert activation probability maps to an RGB heatmap image.
+
+        The function collapses across channels by taking the per-pixel
+        maximum probability and maps the resulting single-channel image to a
+        colored heatmap using OpenCV's COLORMAP_HOT, then converts to RGB.
+
+        Args:
+            activation_probabilities: Numpy array of shape (C, H, W) with
+                probability values in [0, 1].
+
+        Returns:
+            np.array: RGB heatmap image of shape (H, W, 3) in uint8.
         """
         heatmap = (np.max(activation_probabilities, axis=0) * 255).astype("uint8")
         heatmap = cv2.cvtColor(cv2.applyColorMap(heatmap, cv2.COLORMAP_HOT), cv2.COLOR_BGR2RGB)
@@ -198,8 +252,17 @@ class CustomImage:
 
     def create_template_image(self) -> Image:
         """
-        Create a template image with all static elements.
-        :return: The template image.
+        Create the static layout image used as a base for visualizations.
+
+        This method composes the overall canvas including title text,
+        section labels, logo, decorative borders and arrow indicators. The
+        resulting PIL Image is used as a template onto which dynamic tiles
+        (input, feature masks, activations, heatmaps) are pasted for each
+        visualization frame.
+
+        Returns:
+            PIL.Image: Template RGB image sized to accommodate tiles and
+                annotations.
         """
         outer_padding = 30
         inner_padding = 80
@@ -257,12 +320,21 @@ class CustomImage:
 
     def create_image(self, img: Tensor, s1_in_features: Tensor, s2_act: Tensor, s2_act_prob: Tensor) -> np.array:
         """
-        Creates the image for the current step
-        :param img: Input image that was fed into the network with shape (1, v, 1, h, w)
-        :param s1_in_features: The input features of the sensory system with shape (1, v, 4, h, w)
-        :param s2_act: The activations of the S2 layer with shape (1, v, t, 4, h, w)
-        :param s2_act_prob: The activation probabilities of the S2 layer with shape (1, v, t, 4, h, w)
-        :return: The image of the network state as a numpy array
+        Assemble a visualization frame for a single timestep.
+
+        Converts tensors for the input image, S1 feature masks, discrete S2
+        activations and S2 activation probabilities into PIL images, resizes
+        them to the configured tile size and pastes them onto the template
+        to produce a final RGB frame suitable for writing to a video.
+
+        Args:
+            img: Input image tensor with values in [0,1].
+            s1_in_features: Binary feature maps for S1 (tensor).
+            s2_act: Binary S2 activations (tensor).
+            s2_act_prob: S2 activation probability maps (tensor).
+
+        Returns:
+            np.array: Final RGB frame as a NumPy array (H, W, 3).
         """
         assert 0. <= img.min() and img.max() <= 1., "img must be in [0, 1]"
         # assert 0. <= s1_in_features.min() and s1_in_features.max() <= 1., "in_features must be in [0, 1]"
@@ -294,11 +366,21 @@ class CustomImage:
         return np.array(output)
 
 
-def get_data_generator(config: Dict[str, Any]) -> Tuple[torch.Tensor, torch.Tensor]:
+def get_data_generator(config: Dict[str, Any]):
     """
-    Get data generator
-    :param config: Configuration.
-    :return: Data generator.
+    Yield input samples and metadata according to the configured dataset type.
+
+    Depending on config['line_type'], this factory yields different kinds of
+    synthetic images: straight moving lines, curved splines, digit strokes,
+    or simple objects. Each yielded item is a tuple (image_tensor, meta).
+
+    Args:
+        config (Dict[str, Any]): Configuration dictionary containing dataset parameters such
+            as 'line_type', 'n_samples' and 'line_interrupt'.
+
+    Yields:
+        Tuple[Tensor, Dict]: A pair of the input image tensor and an
+            associated metadata dictionary for each sample.
     """
     if config['line_type'] == 'straight':
         points = get_datapoints(config['n_samples'])
@@ -470,12 +552,23 @@ def get_data_generator(config: Dict[str, Any]) -> Tuple[torch.Tensor, torch.Tens
 
 def merge_alt_channels(config: Dict[str, Optional[Any]], lateral_features: List[Tensor]) -> List[Tensor]:
     """
-    Merge the alternative channels of the lateral features to the original channels.
-    (Possible since only one channel per alternative channels ist active).
-    -> This allows better visualization of the lateral features (4 channels vs. 80 channels)
+    Collapse alternative-channel representations into original channel axes.
 
-    :param lateral_features: The lateral features with alternative channels
-    :return: The lateral features with original channels
+    Some lateral representations use an "alternative cells" strategy where
+    each logical channel is represented by multiple alternative channels
+    (only one active at a time). This function reshapes and takes the
+    element-wise maximum across alternatives to restore the original channel
+    dimensionality for visualization and analysis.
+
+    Args:
+        config (Dict[str, Optional[Any]]): Configuration dict containing 'n_alternative_cells' and
+            lateral_model channel count.
+        lateral_features (List[Tensor]): List of tensors representing lateral activations
+            at different timesteps.
+
+    Returns:
+        List[Tensor]: Lateral features with alternatives merged into the
+            original channel dimension.
     """
     n_alt = config['n_alternative_cells']
     n_channels = config['lateral_model']['channels']
@@ -491,13 +584,23 @@ def merge_alt_channels(config: Dict[str, Optional[Any]], lateral_features: List[
 
 def analyze_noise(noise: Tensor, random_mask: Tensor, lateral_features: List[Tensor]) -> float:
     """
-    Analyzes how well noise can be reduced.
+    Compute the fraction of noisy elements that were corrected by the model.
 
-    :param noise:
-    :param features:
-    :param random_mask:
-    :param lateral_features:
-    :return: The ratio of removed noise
+    Given a binary mask of positions that were flipped (random_mask) and the
+    ground-truth noise values, this function inspects the final lateral
+    activations to determine how many noisy positions were changed back to
+    their original values. The metric is returned as a float ratio in [0,1].
+
+    Args:
+        noise (Tensor): Tensor containing the original noise values for masked
+            positions.
+        random_mask (Tensor): 1D boolean tensor indexing the flattened positions that
+            were flipped.
+        lateral_features (List[Tensor]): List of lateral activation tensors; the final
+            timestep is used for the evaluation.
+
+    Returns:
+        float: Fraction of noisy positions that were corrected.
     """
     lateral_features = lateral_features[-1].view(-1)
     lateral_features_noise = lateral_features[random_mask]
@@ -508,11 +611,22 @@ def analyze_noise(noise: Tensor, random_mask: Tensor, lateral_features: List[Ten
 def analyze_recon_error(lateral_features: List[Tensor], baseline_lateral_features: List[Tensor]) -> Tuple[
     float, float, float]:
     """
-    Analyzes the reconstruction error of the lateral features.
+    Compute reconstruction accuracy, recall and precision between two sets of
+    lateral activations.
 
-    :param lateral_features:
-    :param baseline_lateral_features:
-    :return: The reconstruction error
+    The function compares the final-timestep flattened lateral features to a
+    baseline activation vector using L1 loss transformed into a similarity
+    score (1 - L1). It returns three metrics: overall accuracy, recall on
+    baseline-active positions, and precision on predicted-active positions.
+
+    Args:
+        lateral_features (List[Tensor]): List of tensors of predicted lateral activations
+            across timesteps.
+        baseline_lateral_features (List[Tensor]): List of tensors containing baseline
+            activations for comparison.
+
+    Returns:
+        Tuple[float, float, float]: (accuracy, recall, precision) as floats.
     """
     lateral_features = lateral_features[-1].view(-1)
     baseline_lateral_features = baseline_lateral_features[-1].view(-1)
@@ -529,12 +643,23 @@ def analyze_interrupt_line(img: Tensor,
                            lateral_features: List[Tensor],
                            baseline_lateral_features: List[Tensor]) -> float:
     """
-    Analyzes the reconstruction error of the lateral features.
-    :param img: The input image
-    :param baseline_img: The baseline input image
-    :param lateral_features: The lateral features
-    :param baseline_lateral_features: The baseline lateral features
-    :return: Reconstruction accuracy
+    Measure reconstruction accuracy specifically over interrupted pixels.
+
+    This function identifies pixels that differ between the current input
+    image and a baseline (uninterrupted) image, extracts the corresponding
+    S2 activations from predicted and baseline lateral features, and
+    computes an L1-based accuracy score over only those positions that were
+    active in the baseline. If no baseline-active positions exist in the
+    masked region, a default score of 0.0 is returned.
+
+    Args:
+        img (Tensor): Current input image tensor.
+        baseline_img (Tensor): Baseline (reference) image tensor.
+        lateral_features (List[Tensor]): Predicted lateral features (list of tensors).
+        baseline_lateral_features (List[Tensor]): Baseline lateral features (list of tensors).
+
+    Returns:
+        float: Reconstruction accuracy in [0,1] over interrupted pixels.
     """
     baseline_img = baseline_img[-1].squeeze()
     mask = torch.where(img != baseline_img, True, False).unsqueeze(0).repeat(lateral_features[-1].shape[1], 1, 1)
@@ -560,12 +685,25 @@ def step_lateral_model(
         model: pl.LightningModule
 ) -> Tuple[List[Tensor], List[Tensor], List[Tensor], List[Tensor]]:
     """
-    Step the lateral model for a given batch.
-    :param config: The configuration
-    :param batch: The batch
-    :param features: The features
-    :param model: The later model S2
-    :return:
+    Run the lateral (S2) recurrent model across configured timesteps.
+
+    For each timestep the model is advanced, the combined input (sensory
+    features and current S2 state) is passed through the module to produce
+    continuous and binary S2 activations. The function collects and
+    returns lists of inputs, input features, discrete lateral activations
+    and continuous lateral activations for all timesteps.
+
+    Args:
+        config (Dict[str, Any]): Configuration dict containing lateral model parameters such
+            as 'max_timesteps'.
+        batch (Tensor): Raw input image tensor for the current sample.
+        features (Tensor): Precomputed sensory features from the feature extractor.
+        model (pl.LightningModule): The LightningModule implementing the lateral dynamics.
+
+    Returns:
+        Tuple[List[Tensor], List[Tensor], List[Tensor], List[Tensor]]: Lists
+            of (batch inputs, input features, binary lateral activations,
+            continuous lateral activations) across timesteps.
     """
     input, input_features, lateral_features, lateral_features_float = [], [], [], []
 
@@ -585,6 +723,22 @@ def step_lateral_model(
     return input, input_features, lateral_features, lateral_features_float
 
 def step_autoencoder(batch: Tensor, features: Tensor, model: pl.LightningModule) -> Tuple[List[Tensor], List[Tensor], List[Tensor], List[Tensor]]:
+    """
+    Single-step autoencoder forward to obtain binary and continuous codes.
+
+    The autoencoder path is non-recurrent: the model computes a continuous
+    code (clamped to [0,1]) which is then thresholded at 0.5 to obtain a
+    binary activation map. The resulting lists mirror the timestep-based
+    outputs from the recurrent lateral model for compatibility.
+
+    Args:
+        batch: Raw input tensor for the sample.
+        features: Sensory features from the feature extractor.
+        model: Autoencoder LightningModule.
+
+    Returns:
+        Tuple of lists: ([batch], [features], [binary_code], [continuous_code]).
+    """
     z_float = model(features)
     z_float = torch.clamp(z_float, min=0., max=1.)
     z = torch.where(z_float > 0.5, 1., 0.)
@@ -599,16 +753,29 @@ def predict_sample(
         model: pl.LightningModule,
         batch: Tensor,
         batch_idx: int,
-) -> Tuple[Tensor, Tensor, Tensor, Tensor, float, float]:
+) -> Tuple[Tensor, Tensor, Tensor, Tensor, float, float, Tuple[float, float, float]]:
     """
-    Predicts the features for a given sample
-    :param config: Configuration
-    :param fabric: Fabric instance
-    :param feature_extractor: Feature extractor
-    :param model: Lateral network (S2) or autoencoder
-    :param batch: Data batch
-    :param batch_idx: Batch index
-    :return: Features from feature extractor, lateral network, and l2 network
+    Run feature extraction and lateral model inference for a single sample.
+
+    The function moves the batch to the Fabric device, computes sensory
+    features, optionally injects synthetic noise, and then runs either the
+    recurrent lateral model or the autoencoder path. It also computes
+    analysis metrics such as removed noise ratio and reconstruction
+    measures by comparing to stored baseline activations if available.
+
+    Args:
+        config (Dict[str, Optional[Any]]): Configuration dictionary controlling model behavior.
+        fabric (Fabric): Fabric instance providing device placement.
+        feature_extractor (pl.LightningModule): Feature extractor LightningModule.
+        model (pl.LightningModule): Lateral network or autoencoder LightningModule.
+        batch (Tensor): Single-sample batch tensor produced by the data generator.
+        batch_idx (int): Integer index of the current sample.
+
+    Returns:
+        Tuple[Tensor, Tensor, Tensor, Tensor, float, float, Tuple[float, float, float]]: Stacked tensors for inputs, input features, binary lateral
+            activations, continuous lateral activations, removed_noise
+            ratio, interrupt_line_reconstruction score, and reconstruction
+            error tuple.
     """
 
 
@@ -647,20 +814,31 @@ def predict_sample(
 
 
 def process_data(
-        generator,
+        generator: Any,
         config: Dict[str, Any],
         fabric: Fabric,
         feature_extractor: pl.LightningModule,
         model: pl.LightningModule,
-):
+) -> Tuple[float, float, float, float, float, Dict[str, Any]]:
     """
-    Processes the data and store the network activations as video
-    :param generator: Data generator
-    :param eval_args: Evaluation arguments
-    :param config: Configuration
-    :param fabric: Fabric instance
-    :param feature_extractor: Feature extractor
-    :param model: Lateral network (S2) or autoencoder
+    Iterate over data, run model inference, collect metrics and save video.
+
+    For each sample yielded by the generator this function runs prediction,
+    constructs visualization frames, writes them into an MP4 file, and
+    aggregates metrics such as noise reduction and reconstruction scores.
+    Optionally stores baseline activations and logs summary statistics
+    suitable for wandb reporting.
+
+    Args:
+        generator (Any): Iterable yielding (image, meta) tuples.
+        config (Dict[str, Any]): Configuration dict controlling dataset and model options.
+        fabric (Fabric): Fabric instance for device placement.
+        feature_extractor (pl.LightningModule): Feature extractor LightningModule.
+        model (pl.LightningModule): Lateral network or autoencoder LightningModule.
+
+    Returns:
+        Tuple[float, float, float, float, float, Dict[str, Any]]: Aggregated metrics (noise_reduction, line_recon_acc,
+            recon_accuracy, recon_recall, recon_precision, logs dict).
     """
 
     logs = {}
@@ -770,15 +948,23 @@ def store_experiment_results(noise_reduction: float,
                              recon_accuracy: float,
                              recon_recall: float,
                              recon_precision: float,
-                             config: Dict[str, Any]):
+                             config: Dict[str, Any]) -> None:
     """
-    Stores the noise reduction results in a csv file
-    :param noise_reduction: Noise reduction
-    :param avg_line_recon_accuracy_meter: Line reconstruction accuracy
-    :param recon_accuracy: Reconstruction accuracy
-    :param recon_recall: Reconstruction recall
-    :param recon_precision: Reconstruction precision
-    :param config: Configuration
+    Append summary experiment metrics and configuration to a JSONL file.
+
+    The function writes a JSON object with the provided metrics and the
+    full configuration to a per-experiment results file inside RESULTS_BASE_DIR.
+    The parent directory is created if missing. Each call appends one JSON
+    line to the file, enabling accumulation of multiple runs.
+
+    Args:
+        noise_reduction (float): Mean fraction of noise removed by the model.
+        avg_line_recon_accuracy_meter (float): Mean reconstruction accuracy on
+            interrupted line segments.
+        recon_accuracy (float): Overall reconstruction accuracy metric.
+        recon_recall (float): Reconstruction recall metric.
+        recon_precision (float): Reconstruction precision metric.
+        config (Dict[str, Any]): Configuration dictionary used to run the experiment.
     """
     fp = f"{RESULTS_BASE_DIR}/{config['config']}/experiment_results.json"
     print(fp)
@@ -792,9 +978,14 @@ def store_experiment_results(noise_reduction: float,
         f.write("\n")
 
 
-def main():
+def main() -> None:
     """
-    Main function
+    Entry point for evaluation: load models, run data processing and log results.
+
+    This function orchestrates the full evaluation pipeline: it loads the
+    trained models, sets up wandb logging, iterates over the dataset to
+    create visualization videos and metrics, stores aggregate results and
+    finalizes logging if enabled.
     """
     print_start("Starting python script 'main_evaluation.py'...",
                 title="Evaluating Model and Print activations")

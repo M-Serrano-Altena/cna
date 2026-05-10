@@ -1,6 +1,6 @@
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
-from lightning.fabric.loggers import Logger
+from lightning.fabric.loggers.logger import Logger
 from lightning.pytorch.loggers import WandbLogger
 
 from utils.custom_print import print_logs
@@ -8,16 +8,33 @@ from utils.custom_print import print_logs
 
 class ConsoleLogger:
     """
-    Logger that prints to console
+    Simple console logger that formats and prints metric dictionaries.
+
+    This logger groups metrics by prefix (the part before a "/" in the
+    metric key) and prints each group using the project's custom
+    print_logs helper. If a metric key does not contain a prefix, it is
+    placed under the "general" group along with the provided step.
     """
 
-    def log_metrics(self, metrics: Dict[str, float], step: Optional[int]):
+    def log_metrics(self, metrics: Dict[str, float], step: Optional[int]) -> None:
         """
-        Log metrics to console
-        :param metrics: The metrics to log
-        :param step: The current step
+        Format and print metrics to the console.
+
+        Groups metrics by prefix when a metric key contains a '/'. For
+        example, a key 'train/loss' will be grouped under 'train' with
+        the subkey 'loss'. Keys without a '/' are collected under the
+        'general' group. The optional step is included in the 'general'
+        group as 'step'. Each group is printed using print_logs.
+
+        Args:
+            metrics (Dict[str, float]): Mapping of metric names to values.
+            step (Optional[int]): Current global step or iteration.
+
+        Returns:
+            None: This method only prints to the console and does not
+            return a value.
         """
-        logs_by_prefix = {"general": {'step': step}}
+        logs_by_prefix: Dict[str, Dict[str, Union[int, float, None]]] = {"general": {'step': step}}
         for k, v in metrics.items():
             if "/" in k:
                 prefix, metric = k.split("/", 1)
@@ -33,9 +50,27 @@ class ConsoleLogger:
 
 def loggers_from_conf(conf: Dict) -> List[Logger]:
     """
-    Create a list of loggers from a config dict.
-    :param conf: Config dict
-    :return: List of loggers
+    Build logger instances from a configuration dictionary.
+
+    The configuration is expected to contain a 'logging' section where
+    each entry specifies a logger name and its settings. Inactive
+    loggers (logger_conf['active'] is False) are skipped. Supported
+    logger names (case-insensitive) include:
+      - 'wandb': Instantiates a lightning.pytorch WandbLogger with the
+        provided project, save_dir, log_model, job_type and group.
+      - 'console': Instantiates the local ConsoleLogger.
+
+    Args:
+        conf (Dict): Configuration dictionary containing a 'logging'
+            mapping with logger names and their respective settings.
+
+    Returns:
+        List[Logger]: A list of instantiated logger objects compatible
+        with Lightning Fabric/PyTorch Lightning logging interfaces.
+
+    Raises:
+        NotImplementedError: If a logger name is present in the
+            configuration but is not supported by this factory.
     """
     loggers = []
     for logger_name, logger_conf in conf['logging'].items():

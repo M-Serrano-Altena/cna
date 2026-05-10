@@ -7,6 +7,11 @@ import torchvision.transforms as T
 from torch.utils.data import Dataset
 
 class SplineLine(Dataset):
+    """Dataset that procedurally generates binary images containing one spline-like line.
+
+    Each sample is a single-channel image where line pixels are set to 1 and all
+    remaining pixels are 0.
+    """
 
     def __init__(self,
                  img_h: Optional[int] = 32,
@@ -14,12 +19,16 @@ class SplineLine(Dataset):
                  num_images: Optional[int] = 50,
                  n_spline_points: Optional[int] = 2,
                  transform: Optional[Callable] = None):
-        """
-        Dataset that generates images with a straight line.
-        :param img_h: Height of the images.
-        :param img_w: Width of the images.
-        :param num_images: Number of images to generate.
-        :param transform: Optional transform to be applied on a sample.
+        """Initialize the spline-line dataset.
+
+        Args:
+            img_h (Optional[int]): Height of each generated image in pixels.
+            img_w (Optional[int]): Width of each generated image in pixels.
+            num_images (Optional[int]): Total number of samples to generate.
+            n_spline_points (Optional[int]): Number of interior control points used
+                to define the interpolated line.
+            transform (Optional[Callable]): Transform applied to each generated
+                image. If ``None``, a default ``ToTensor`` transform is used.
         """
         super().__init__()
 
@@ -37,13 +46,24 @@ class SplineLine(Dataset):
         self.lines = [self._get_random_line() for _ in range(num_images)]
 
     def __len__(self):
-        """
-        Returns the number of images in the dataset.
-        :return: Number of images in the dataset.
+        """Return the number of generated samples.
+
+        Returns:
+            int: Dataset size.
         """
         return self.num_images
 
-    def _get_random_line(self) -> np.array:
+    def _get_random_line(self) -> np.ndarray:
+        """Generate one binary image containing a random interpolated line.
+
+        The line is built by interpolating random y-values over evenly spaced
+        x-control points, then filling vertical gaps to keep connectivity between
+        adjacent x positions. With 50% probability, the image is transposed.
+
+        Returns:
+            np.ndarray: A 2D NumPy array of shape ``(img_h, img_w)`` with values in
+            ``{0, 1}``.
+        """
 
         x = np.linspace(2.0, self.img_w - 2, num=self.n_spline_points+2)
         y = np.random.randint(2, self.img_h - 2, size=self.n_spline_points+2)
@@ -75,6 +95,15 @@ class SplineLine(Dataset):
         return img
 
     def __getitem__(self, idx: int):
+        """Return a transformed sample and an empty target dictionary.
+
+        Args:
+            idx (int): Sample index.
+
+        Returns:
+            tuple[torch.Tensor, dict]: A tuple containing the transformed image
+            tensor (``float32``) and an empty metadata/target dictionary.
+        """
         return self.transform(self.lines[idx]).type(torch.float32), {}
 
 

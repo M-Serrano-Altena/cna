@@ -26,7 +26,7 @@ class LateralLayer(nn.Module):
                  locality_size: Optional[int] = 2,
                  lr: Optional[float] = 0.0005,
                  neg_corr: Optional[bool] = False,
-                 act_threshold: Optional[Union[Literal["bernoulli"] | float]] = "bernoulli",
+                 act_threshold: Optional[Union[Literal["bernoulli"], float]] = "bernoulli",
                  square_factor: Optional[float] = 1.2,
                  support_factor: Optional[float] = 1.3,
                  n_alternative_cells: Optional[int] = 1,

@@ -17,13 +17,17 @@ class StraightLine(Dataset):
                  num_images: Optional[int] = 50,
                  n_black_pixels: Optional[int] = 1,
                  transform: Optional[Callable] = None):
-        """
-        Dataset that generates images with a straight line.
-        :param img_h: Height of the images.
-        :param img_w: Width of the images.
-        :param num_images: Number of images to generate.
-        :param n_black_pixels: The number of black pixels to add to the image.
-        :param transform: Optional transform to be applied on a sample.
+        """Dataset that generates synthetic images containing a single straight line.
+
+        Args:
+            img_h (Optional[int]): Image height in pixels. Defaults to 32.
+            img_w (Optional[int]): Image width in pixels. Defaults to 32.
+            num_images (Optional[int]): Number of samples in the dataset. Defaults to 50.
+            n_black_pixels (Optional[int]): Number of black (missing) pixels to insert
+                on the line to simulate discontinuities. Defaults to 1.
+            transform (Optional[Callable]): Optional transform applied to PIL image
+                before returning (e.g. torchvision transforms). If None, ToTensor
+                is applied by default.
         """
         super().__init__()
 
@@ -39,16 +43,22 @@ class StraightLine(Dataset):
             ])
 
     def __len__(self):
-        """
-        Returns the number of images in the dataset.
-        :return: Number of images in the dataset.
+        """Return the number of images in the dataset.
+
+        Returns:
+            int: The configured number of images (num_images).
         """
         return self.num_images
 
     def _get_random_line_coords(self) -> Tuple[Tuple[int, int], Tuple[int, int]]:
-        """
-        Returns the coordinates of a random straight line (create two random x,y coordinates).
-        :return: a Tuple of two Tuples of x,y coordinates.
+        """Generate coordinates for a random straight line within the image bounds.
+
+        The method either creates a mostly horizontal or mostly vertical line by
+        choosing endpoints on opposite edges with a small margin.
+
+        Returns:
+            Tuple[Tuple[int,int], Tuple[int,int]]: Two (x, y) endpoint coordinates
+                specifying the line within image dimensions.
         """
         if random.random() < 0.5:
             x1 = 2
@@ -63,11 +73,16 @@ class StraightLine(Dataset):
 
         return (x1, y1), (x2, y2)
 
-    def _create_l_image(self, line_coords: Optional[Tuple[Tuple[int, int], Tuple[int, int]]]) -> Image:
-        """
-        Creates a black grayscale image with a random straight line in withe drawn on it.
-        :param line_coords: The coordinates of the line to draw.
-        :return: The image.
+    def _create_l_image(self, line_coords: Optional[Tuple[Tuple[int, int], Tuple[int, int]]]) -> Image.Image:
+        """Create a grayscale PIL image with a white straight line drawn on black.
+
+        Args:
+            line_coords (Optional[Tuple[Tuple[int,int], Tuple[int,int]]]): Pair of
+                (x, y) coordinates for the line endpoints. If None an empty image
+                is created (caller typically supplies coordinates).
+
+        Returns:
+            PIL.Image: Grayscale (mode 'L') image containing the drawn line.
         """
         img = Image.new('L', (self.img_w, self.img_h), color=0)
         draw = ImageDraw.Draw(img)
@@ -78,13 +93,21 @@ class StraightLine(Dataset):
             self,
             line_coords: Tuple[Tuple[int, int], Tuple[int, int]],
             n_black_pixels: Optional[int] = None
-    ) -> Image:
-        """
-        Creates either a RBG or a grayscale image with a random straight line in withe drawn on it.
-        :param idx: The index of the image.
-        :param line_coords: The coordinates of the line to draw.
-        :param n_black_pixels: The number of black pixels to add to the middle of the line.
-        :return: The image.
+    ):
+        """Create an image with a white line and optional black gaps at the center.
+
+        The image is generated in grayscale, the specified line is drawn in white
+        and, if n_black_pixels > 0, a contiguous block of black pixels is inserted
+        around the midpoint of the line to create a discontinuity.
+
+        Args:
+            line_coords (Tuple[Tuple[int,int], Tuple[int,int]]): Endpoints of the line.
+            n_black_pixels (Optional[int]): Number of black pixels to set on the line's
+                center. If None, uses the dataset default. Defaults to None.
+
+        Returns:
+            PIL.Image or Tensor: Transformed image. If a transform is configured the
+                returned object may be a tensor (e.g. from torchvision.transforms).
         """
         if n_black_pixels is None:
             n_black_pixels = self.n_black_pixels
@@ -117,12 +140,20 @@ class StraightLine(Dataset):
             line_coords: Optional[Tuple[Tuple[int, int], Tuple[int, int]]] = None,
             n_black_pixels: Optional[int] = 0,
     ):
-        """
-        Returns an image with a random straight line drawn on it.
-        :param idx: Index of the image to return (has no effect)
-        :param line_coords: The starting coordinates of the line to draw.
-        :param n_black_pixels: The number of black pixels to add to the middle of the line.
-        :return: The image
+        """Return an image sample and metadata for a given index.
+
+        Args:
+            idx (int): Index requested by caller (not used to generate content).
+            line_coords (Optional[Tuple[Tuple[int,int], Tuple[int,int]]]): If
+                provided, these coordinates are used for the line; otherwise a
+                random line is generated.
+            n_black_pixels (Optional[int]): Number of black pixels to insert
+                at the line center. Defaults to 0.
+
+        Returns:
+            tuple: (image, metadata) where image is the transformed image (PIL or
+                tensor) and metadata is a dict containing 'line_coords' and
+                'angle' (float, radians).
         """
         if line_coords is None:
             line_coords = self._get_random_line_coords()

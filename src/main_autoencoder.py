@@ -25,10 +25,15 @@ import os
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 def parse_args(parser: Optional[argparse.ArgumentParser] = None):
-    """
-    Parse arguments from command line.
-    :param parser: Optional ArgumentParser instance.
-    :return: Parsed arguments.
+    """Parse command-line arguments.
+
+    Args:
+        parser (Optional[argparse.ArgumentParser]): Optional ArgumentParser instance. If None,
+            a new ArgumentParser will be created.
+
+    Returns:
+        argparse.Namespace: Parsed arguments namespace containing the config path and any
+            overridden run/store/load options.
     """
     if parser is None:
         parser = argparse.ArgumentParser(description="Autoencoder Baseline")
@@ -56,11 +61,14 @@ def parse_args(parser: Optional[argparse.ArgumentParser] = None):
     args = parser.parse_args()
     return args
 
-def setup_fabric(config: Dict[str, Optional[Any]] = None) -> Fabric:
-    """
-    Setup the Fabric instance.
-    :param config: Configuration dict
-    :return: Fabric instance
+def setup_fabric(config: Optional[Dict[str, Optional[Any]]] = None) -> Fabric:
+    """Set up the Lightning Fabric instance used for training.
+
+    Args:
+        config (Dict[str, Optional[Any]], Optional): Configuration dictionary.
+
+    Returns:
+        Fabric: Initialized and launched Fabric instance with deterministic seed set.
     """
     callbacks = []
     loggers = loggers_from_conf(config)
@@ -70,12 +78,18 @@ def setup_fabric(config: Dict[str, Optional[Any]] = None) -> Fabric:
     return fabric
 
 
-def setup_autoencoder(config: Dict[str, Optional[Any]], fabric: Fabric) -> (BaseLitModule, Optimizer):
-    """
-    Setup components for training.
-    :param config: Configuration dict
-    :param fabric: Fabric instance
-    :return: Returns the model and the optimizer
+def setup_autoencoder(config: Dict[str, Optional[Any]], fabric: Fabric) -> Tuple[BaseLitModule, Optimizer]:
+    """Create the autoencoder model and its optimizer, and prepare them with Fabric.
+
+    Args:
+        config (Dict[str, Optional[Any]]): Configuration dictionary used to construct the
+            Autoencoder.
+        fabric (Fabric): Fabric instance used to setup the model and optimizer for
+            distributed/accelerator execution.
+
+    Returns:
+        Tuple[BaseLitModule, Optimizer]: The LightningModule wrapper for the autoencoder
+            and the optimizer instance ready for training.
     """
     model = Autoencoder(config, fabric)
     optimizer = model.configure_optimizers()
@@ -84,11 +98,17 @@ def setup_autoencoder(config: Dict[str, Optional[Any]], fabric: Fabric) -> (Base
 
 
 def setup_dataloader(config: Dict[str, Optional[Any]], fabric: Fabric) -> (DataLoader, DataLoader):
-    """
-    Setup the dataloaders for training and testing.
-    :param config: Configuration dict
-    :param fabric: Fabric instance
-    :return: Returns the training dataloader
+    """Create and prepare training and evaluation dataloaders.
+
+    Args:
+        config (Dict[str, Optional[Any]]): Configuration dictionary used to create
+            dataset loaders.
+        fabric (Fabric): Fabric instance used to wrap dataloaders for correct device
+            and process placement.
+
+    Returns:
+        Tuple[DataLoader, DataLoader]: The training and evaluation dataloaders wrapped
+            for Fabric execution.
     """
     train_loader, eval_loader, _ = loaders_from_config(config)
     train_loader = fabric.setup_dataloaders(train_loader)
@@ -98,9 +118,14 @@ def setup_dataloader(config: Dict[str, Optional[Any]], fabric: Fabric) -> (DataL
 
 
 def configure() -> Dict[str, Optional[Any]]:
-    """
-    Load the config based on the given console args.
-    :return:
+    """Load and prepare the configuration from command-line arguments.
+
+    Parses command-line arguments to obtain a config file path and any run/load/store
+    overrides, loads the configuration, adjusts the store path to include a timestamp
+    when pointing to an existing directory, and warns if CUDA is unavailable.
+
+    Returns:
+        Dict[str, Optional[Any]]: The resolved configuration dictionary.
     """
     args = parse_args()
     config = get_config(args.config, args)
@@ -113,10 +138,16 @@ def configure() -> Dict[str, Optional[Any]]:
 
 
 def setup_modules(config: Dict[str, Optional[Any]]) -> Tuple[Fabric, BaseLitModule, Optimizer, DataLoader, DataLoader]:
-    """
-    Setup the modules for training.
-    :param config: Configuration dict
-    :return: Returns the fabric, model, optimizer, scheduler, training dataloader and testing dataloader
+    """Initialize Fabric, model, optimizer and dataloaders; optionally load saved state.
+
+    Args:
+        config (Dict[str, Optional[Any]]): Configuration dictionary containing run
+            parameters and paths for loading/storing state.
+
+    Returns:
+        Tuple[Fabric, BaseLitModule, Optimizer, DataLoader, DataLoader]: A tuple
+            containing the Fabric instance, the prepared model and optimizer, and the
+            training and evaluation dataloaders.
     """
     fabric = setup_fabric(config)
     model, optimizer = setup_autoencoder(config, fabric)
@@ -136,17 +167,24 @@ def single_train_epoch(
         optimizer: Optimizer,
         train_dataloader: DataLoader,
         epoch: int,
-):
-    """
-    Train a single epoch.
-    :param config: Configuration dict
-    :param fabric: Fabric instance
-    :param feature_extractor: Feature extractor
-    :param model: Model to train
-    :param optimizer: Optimizer to use
-    :param train_dataloader: Training dataloader
-    :param epoch: Current epoch
-    :return: Returns the training logs
+) -> None:
+    """Run a single training epoch over the provided dataloader.
+
+    Args:
+        config (Dict[str, Optional[Any]]): Configuration dictionary containing run
+            parameters such as total number of epochs.
+        fabric (Fabric): Fabric instance for backward and device handling.
+        feature_extractor (LightningModule): Pretrained feature extractor used to
+            transform raw inputs before passing to the autoencoder. This is set to
+            evaluation mode and not trained.
+        model (BaseLitModule): The autoencoder LightningModule providing
+            training_step and related hooks.
+        optimizer (Optimizer): Optimizer used to update model parameters.
+        train_dataloader (DataLoader): Dataloader yielding training batches.
+        epoch (int): Index of the current epoch (0-based).
+
+    Returns:
+        None
     """
     model.train()
     feature_extractor.eval() # fixed, does not require training
@@ -169,15 +207,21 @@ def single_eval_epoch(
         model: BaseLitModule,
         test_dataloader: DataLoader,
         epoch: int,
-):
-    """
-    Evaluate a single epoch.
-    :param config: Configuration dict
-    :param feature_extractor: Feature extractor
-    :param model: The model to evaluate
-    :param test_dataloader: Testing dataloader
-    :param epoch: Current epoch
-    :return: Returns the validation logs
+) -> None:
+    """Evaluate the model on the validation/test dataloader for one epoch.
+
+    Args:
+        config (Dict[str, Optional[Any]]): Configuration dictionary with run
+            parameters.
+        feature_extractor (LightningModule): Feature extractor used to pre-process
+            inputs before evaluation.
+        model (BaseLitModule): The autoencoder LightningModule exposing
+            validation_step and epoch_end hooks.
+        test_dataloader (DataLoader): Dataloader yielding validation/test batches.
+        epoch (int): Index of the current epoch (0-based).
+
+    Returns:
+        None
     """
     model.eval()
     feature_extractor.eval()
@@ -198,7 +242,7 @@ def train_model(
         optimizer: Optimizer,
         train_dataloader: DataLoader,
         eval_loader: DataLoader
-):
+) -> None:
     """
     Train the model for multiple epochs.
     :param config: Configuration dict
@@ -232,6 +276,14 @@ def train_model(
 def main():
     """
     Run the model and store the model with the lowest loss.
+    """
+    """Main entrypoint to configure, initialize and train the autoencoder.
+
+    This function parses arguments, prepares Fabric, model, optimizer and
+    dataloaders, initializes the feature extractor and runs the training loop.
+
+    Returns:
+        None
     """
     config = configure()
     fabric, model, optimizer, train_dataloader, eval_loader = setup_modules(config)

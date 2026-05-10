@@ -17,10 +17,16 @@ _path_t = Union[str, os.PathLike, Path]
 def _get_dataset(
         dataset_config: Optional[Dict] = None,
 ) -> Tuple[Any, Optional[Any], Any]:
-    """
-    Get a dataset based on its name.
-    :param dataset_config: Config of the dataset.
-    :return: A dataset.
+    """Build train/validation/test datasets from configuration.
+
+    Args:
+        dataset_config (Optional[Dict]): Dataset configuration dictionary
+            containing ``train_dataset_params``, ``valid_dataset_params``, and
+            ``test_dataset_params``.
+
+    Returns:
+        Tuple[Any, Optional[Any], Any]: Instantiated datasets in the order
+        ``(train_set, valid_set, test_set)``.
     """
     train_set = StraightLine(**dataset_config['train_dataset_params'])
     valid_set = StraightLine(**dataset_config['valid_dataset_params'])
@@ -38,16 +44,25 @@ def _get_loader_safe(
         shuffle: Optional[bool] = True,
         drop_last: Optional[bool] = False,
 ) -> Optional[DataLoader[T_co]]:
-    """
-    Get a data loader.
-    :param dataset: Dataset.
-    :param batch_size: Batch size.
-    :param num_workers: Number of workers.
-    :param pin_memory: Whether to pin memory.
-    :param collate_fn: Collate function.
-    :param shuffle: Whether to shuffle the dataset.
-    :param drop_last: Whether to drop the last mini-batch.
-    :return: Data loader.
+    """Create a ``DataLoader`` if a dataset is provided.
+
+    Initializes deterministic seeding for the data loader generator and worker
+    processes to improve reproducibility across runs.
+
+    Args:
+        dataset (Dataset[T_co]): Input dataset to wrap.
+        batch_size (Optional[int]): Number of samples per batch.
+        num_workers (Optional[int]): Number of worker subprocesses.
+        pin_memory (Optional[bool]): Whether to pin memory for faster host to
+            device transfers.
+        collate_fn (Optional[_collate_fn_t]): Optional custom collation
+            function.
+        shuffle (Optional[bool]): Whether to shuffle dataset indices.
+        drop_last (Optional[bool]): Whether to drop the last incomplete batch.
+
+    Returns:
+        Optional[DataLoader[T_co]]: Configured data loader, or ``None`` when
+        ``dataset`` is ``None``.
     """
     if dataset is not None:
         train_gen = torch.Generator()
@@ -79,22 +94,30 @@ def _get_torch_data_loaders(
         drop_last_valid: Optional[bool] = False,
         drop_last_test: Optional[bool] = False,
 ) -> Tuple[DataLoader[T_co], Optional[DataLoader[T_co]], Optional[DataLoader[T_co]]]:
-    """
-    Get data loaders for train, validation and test sets.
-    :param train_set: Training set.
-    :param valid_set: Validation set.
-    :param test_set: Test set.
-    :param batch_size: Batch size.
-    :param num_workers: Number of workers.
-    :param pin_memory: Whether to pin memory.
-    :param collate_fn: Collate function.
-    :param shuffle_train: Whether to shuffle the training set.
-    :param shuffle_valid: Whether to shuffle the validation set.
-    :param shuffle_test: Whether to shuffle the test set.
-    :param drop_last_train: Whether to drop the last mini-batch of the training set.
-    :param drop_last_valid: Whether to drop the last mini-batch of the validation set.
-    :param drop_last_test: Whether to drop the last mini-batch of the test set.
-    :return: Data loaders for train, validation and test sets.
+    """Create loaders for train, validation, and test datasets.
+
+    Args:
+        train_set (Optional[Dataset[T_co]]): Training dataset.
+        valid_set (Optional[Dataset[T_co]]): Validation dataset.
+        test_set (Optional[Dataset[T_co]]): Test dataset.
+        batch_size (Optional[int]): Number of samples per batch.
+        num_workers (Optional[int]): Number of worker subprocesses.
+        pin_memory (Optional[bool]): Whether to pin memory in each loader.
+        collate_fn (Optional[_collate_fn_t]): Optional collate function shared
+            across loaders.
+        shuffle_train (Optional[bool]): Whether to shuffle the training set.
+        shuffle_valid (Optional[bool]): Whether to shuffle the validation set.
+        shuffle_test (Optional[bool]): Whether to shuffle the test set.
+        drop_last_train (Optional[bool]): Whether to drop last incomplete batch
+            in training.
+        drop_last_valid (Optional[bool]): Whether to drop last incomplete batch
+            in validation.
+        drop_last_test (Optional[bool]): Whether to drop last incomplete batch
+            in testing.
+
+    Returns:
+        Tuple[DataLoader[T_co], Optional[DataLoader[T_co]], Optional[DataLoader[T_co]]]:
+        Data loaders in the order ``(train_loader, valid_loader, test_loader)``.
     """
 
     train_loader = _get_loader_safe(train_set, batch_size, num_workers, pin_memory, collate_fn, shuffle_train,
@@ -108,10 +131,17 @@ def _get_torch_data_loaders(
 
 
 def loaders_from_config(config: Dict) -> Union[Any, Any, Any]:
-    """
-    Get a data loader from a config.
-    :param config: Config.
-    :return: A data loader.
+    """Build dataset loaders from a global configuration dictionary.
+
+    Expects dataset settings under ``config["dataset"]`` and runtime loader
+    settings under ``config["run"]``.
+
+    Args:
+        config (Dict): Full experiment or run configuration.
+
+    Returns:
+        Union[Any, Any, Any]: Tuple-like return containing train, validation,
+        and test data loaders.
     """
     data_config = config["dataset"]
     train_set, valid_set, test_set = _get_dataset(data_config)
