@@ -12,7 +12,7 @@ from utils.custom_print import print_exception, print_info_config, print_warn
 
 _path_t = Union[str, os.PathLike, Path]
 
-CONFIGS_DIR = Path("../configs")
+CONFIGS_DIR = Path("configs")
 DATA_CONFIGS_FP = CONFIGS_DIR / "data.yaml"
 
 

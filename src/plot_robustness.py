@@ -5,6 +5,9 @@ import numpy as np
 import pandas as pd
 from matplotlib import pyplot as plt
 
+AUTOENCODER_RESULTS_DIR = "results/autoencoder"
+GENERAL_RESULTS_DIR = "results/"
+
 
 def replace_square_list(sl):
     base_value = sl[0]
@@ -54,11 +57,13 @@ def plot_line(data, x_key, x_label, y_key, y_label, z_key, z_label, plot_key, pl
               x2_func=None, x2_label=None, set_title=True, filename=None, data_ae=None):
 
     # if problems with font, run it on local machine
-    # plt.rcParams["font.family"] = "Times New Roman"
-    plt.rcParams["font.family"] = "Helvetica"
+    plt.rcParams["font.family"] = "Times New Roman"
+    # plt.rcParams["font.family"] = "Helvetica"
     plt.rcParams["font.size"] = 14
 
     fig, axs = plt.subplots(ncols=len(data[plot_key].unique()), figsize=(13, 4), dpi=300)
+
+    
 
     for ic, (ax, pk) in enumerate(zip(axs, sorted(data[plot_key].unique()))):
         data_ = data[data[plot_key] == pk]
@@ -96,7 +101,7 @@ def plot_line(data, x_key, x_label, y_key, y_label, z_key, z_label, plot_key, pl
 
     plt.tight_layout()
     if filename is not None:
-        plt.savefig(f"../tmp/{filename}")
+        plt.savefig(f"{GENERAL_RESULTS_DIR}/{filename}")
     plt.show()
 
 
@@ -151,8 +156,8 @@ def plot(data, configname, data_ae=None):
 
 
 if __name__ == '__main__':
-    data_ae = get_data(Path(".").absolute().parent / "tmp" / "autoencoder" / "experiment_results.json")
+    data_ae = get_data(Path(AUTOENCODER_RESULTS_DIR) / "experiment_results.json")
     for f in ['net-fragments']:
-        file_path = Path(".").absolute().parent / "tmp" / f / "experiment_results.json"
+        file_path = Path(GENERAL_RESULTS_DIR) / f / "experiment_results.json"
         data = get_data(file_path)
         plot(data, f, data_ae)

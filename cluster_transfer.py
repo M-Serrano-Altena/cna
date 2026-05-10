@@ -63,7 +63,7 @@ Notes:
 """
 
 import argparse
-from output_file_utils import transfer_files_cluster, CLUSTER_BASE_DIR
+from src.utils.output_file_utils import transfer_files_cluster, CLUSTER_BASE_DIR
 import os
 
 CLUSTER_CREDENTIALS_DEFAULT_PATH = os.path.join(os.path.expanduser("~"), ".config", "clusters", "cluster_credentials.json")

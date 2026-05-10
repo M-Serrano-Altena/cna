@@ -19,14 +19,14 @@ run:
   plots:
     enable: True
     only_last_epoch: False
-    store_path: "../tmp/test/"
+    store_path: "results/training/"
   store_state_path: None
   load_state_path: None
 
 logging:
   wandb:
     active: False,
-    save_dir: "../wandb"
+    save_dir: "wandb"
     project: "net-fragments-final"
     log_model: True
     group: base

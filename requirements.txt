@@ -5,4 +5,5 @@ matplotlib~=3.8.2
 deepdiff~=6.7.1
 opencv-python~=4.9.0.80
 pandas~=2.1.4
-paramiko==4.0.0
+scikit-image~=0.25.2
+paramiko~=4.0.0

@@ -25,6 +25,8 @@ from utils.custom_print import print_start
 from utils.meters import AverageMeter
 from utils.store_load_run import load_run
 
+RESULTS_BASE_DIR = Path("results")
+
 
 def parse_args(parser: Optional[argparse.ArgumentParser] = None) -> argparse.ArgumentParser:
     """
@@ -160,6 +162,8 @@ class CustomImage:
     Custom Image class to draw the current state of the network.
     """
 
+    FONTS_DIR = Path("fonts")
+
     def __init__(self):
         """
         Initialize the class.
@@ -215,13 +219,13 @@ class CustomImage:
         self.w3 = self.w2 + self.img_size + inner_dist  # S2
         self.w4 = self.w3 + self.img_size + inner_dist  # S2 Probabilities
 
-        logo = Image.open("../fonts/ZHAW.png").resize((60, 60), Image.Resampling.LANCZOS)
+        logo = Image.open(self.FONTS_DIR / "ZHAW.png").resize((60, 60), Image.Resampling.LANCZOS)
         output.paste(logo, (20, self.height - 20 - 60), mask=logo)
 
         # Add Texts
-        font_title = ImageFont.truetype("../fonts/calibrib.ttf", title_size)
-        font = ImageFont.truetype("../fonts/calibrib.ttf", font_size)
-        font_foot = ImageFont.truetype("../fonts/calibri_italic.ttf", int(font_size * 0.8))
+        font_title = ImageFont.truetype(self.FONTS_DIR / "calibrib.ttf", title_size)
+        font = ImageFont.truetype(self.FONTS_DIR / "calibrib.ttf", font_size)
+        font_foot = ImageFont.truetype(self.FONTS_DIR / "calibri_italic.ttf", int(font_size * 0.8))
         draw = ImageDraw.Draw(output)
         draw.text((outer_padding, outer_padding),
                   "Dynamic Link Architecture (DNA)", (0, 100, 166),
@@ -658,6 +662,7 @@ def process_data(
     :param feature_extractor: Feature extractor
     :param model: Lateral network (S2) or autoencoder
     """
+
     logs = {}
     imgs_, s2_acts = [], []
     ci = CustomImage()
@@ -667,7 +672,7 @@ def process_data(
                                                                                    AverageMeter())
     if 'lateral_model' in config:
         fp = (
-            f"../tmp/{config['line_type']}/{config['config']}/th-"
+            f"{RESULTS_BASE_DIR}/{config['line_type']}/{config['config']}/th-"
             f"{str(config['lateral_model']['s2_params']['act_threshold'])}_sf-"
             f"{config['lateral_model']['s2_params']['square_factor'][0]}-"
             f"{config['lateral_model']['s2_params']['square_factor'][-1]}/"
@@ -675,7 +680,7 @@ def process_data(
             f"{config['line_interrupt']}.mp4")
     else:
         fp = (
-            f"../tmp/{config['line_type']}/{config['config']}/"
+            f"{RESULTS_BASE_DIR}/{config['line_type']}/{config['config']}/"
             f"{'noise-' + str(config['noise']) if config['noise'] > 0 else 'no-noise'}_li-"
             f"{config['line_interrupt']}.mp4")
 
@@ -775,8 +780,11 @@ def store_experiment_results(noise_reduction: float,
     :param recon_precision: Reconstruction precision
     :param config: Configuration
     """
-    fp = f"../tmp/{config['config']}/experiment_results.json"
+    fp = f"{RESULTS_BASE_DIR}/{config['config']}/experiment_results.json"
     print(fp)
+    # Ensure parent directory exists before attempting to write
+    Path(fp).parent.mkdir(parents=True, exist_ok=True)
+
     with open(fp, "a") as f:
         json.dump({'config': config, 'noise_reduction': noise_reduction,
                    'avg_line_recon_accuracy_meter': avg_line_recon_accuracy_meter, 'recon_accuracy': recon_accuracy,
