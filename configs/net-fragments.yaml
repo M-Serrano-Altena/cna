@@ -41,6 +41,7 @@ feature_extractor:
   s1_params:
     use_larger_weights: False
     threshold_f: 'threshold'
+  learn_s1: True
 
 lateral_model:
   channels: 4

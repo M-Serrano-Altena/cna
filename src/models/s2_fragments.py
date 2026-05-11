@@ -192,29 +192,39 @@ class LateralLayer(nn.Module):
         :param x: Input tensor of shape (batch_size, in_channels * kernel_size[0] * kernel_size[1], height, width).
         :param y: Output tensor of shape (batch_size, out_channels, height, width).
         """
-        pos_co_activation, neg_co_activation = self.calculate_correlations(x, y)
-
-        if self.neg_corr:
-            update = torch.mean((pos_co_activation - neg_co_activation), dim=0)
-        else:
-            update = torch.mean(pos_co_activation, dim=0)
-
-        update = torch.where(update > 0., update, 0.)
-        update = (update - update.min()) / (update.max() - update.min() + 1e-10)
-
-        self.W_lateral.data += self.lr * update.view(self.W_lateral.shape)
-        self.W_lateral.data = torch.clip(self.W_lateral.data, 0., 1.)
-
-        if self.n_alternative_cells <= 1:
-            self.W_lateral.data = self.W_lateral.data / (1e-10 + .2 * torch.sqrt(
-                torch.sum(self.W_lateral.data ** 2, dim=[1, 2, 3], keepdim=True)))  # Weight normalization
-
-    def forward(self, x: Tensor) -> Tuple[Tensor, Tensor, Dict[str, float]]:
         with torch.no_grad():
+            pos_co_activation, neg_co_activation = self.calculate_correlations(x, y)
+
+            if self.neg_corr:
+                update = torch.mean((pos_co_activation - neg_co_activation), dim=0)
+            else:
+                update = torch.mean(pos_co_activation, dim=0)
+
+            update = torch.where(update > 0., update, 0.)
+            update = (update - update.min()) / (update.max() - update.min() + 1e-10)
+
+            self.W_lateral.data += self.lr * update.view(self.W_lateral.shape)
+            self.W_lateral.data = torch.clip(self.W_lateral.data, 0., 1.)
+
+            if self.n_alternative_cells <= 1:
+                self.W_lateral.data = self.W_lateral.data / (1e-10 + .2 * torch.sqrt(
+                    torch.sum(self.W_lateral.data ** 2, dim=[1, 2, 3], keepdim=True)))  # Weight normalization
+
+    def forward(self, x: Tensor, require_grad: bool=False) -> Tuple[Tensor, Tensor, Dict[str, float]]:
+        with torch.set_grad_enabled(require_grad):
             x_rearranged = self.rearrange_input(x)
-            x_rearranged = torch.where(x_rearranged > 0.5, 1., 0.)
+            x_rearranged_binary = torch.where(x_rearranged > 0.5, 1., 0.)
+
+            # During training, we want to have a binary version of x_rearranged that is differentiable, so we use the straight-through estimator.
+            # During evaluation, we can simply use the non-differentiable binary version.
+            if require_grad:
+                x_rearranged = x_rearranged_binary.detach() + x_rearranged - x_rearranged.detach()
+            else:
+                x_rearranged = torch.where(x_rearranged > 0.5, 1., 0.)
+
             assert torch.all(
                 (x_rearranged == 0.) | (x_rearranged == 1.)), "x_rearranged not binary -> Torch Config Error"
+            
             x_lateral = F.conv2d(x_rearranged, self.W_lateral, padding="same", )
 
             # ----------------------------------------------------------------------------------------------------
@@ -289,7 +299,8 @@ class LateralLayer(nn.Module):
             else:
                 x_lateral_bin = (x_lateral_norm ** self.square_factor[self.ts] >= self.act_threshold).float()
 
-
+        # Compute stats with no_grad to avoid tracking their computation
+        with torch.no_grad():
             stats = {
                 "S2/avg_support_active": x_lateral[x_lateral_bin > 0].mean().item(),
                 "S2/std_support_active": x_lateral[x_lateral_bin > 0].std().item(),
@@ -306,7 +317,7 @@ class LateralLayer(nn.Module):
                 "S2/norm_factor": torch.mean(x_lateral / (1e-10 + x_lateral_norm)).item()
             }
 
-            return x_lateral_norm, x_lateral_bin, stats
+        return x_lateral_norm, x_lateral_bin, stats
 
 class LateralLayerEfficientNetwork1L(nn.Module):
     """
@@ -343,7 +354,7 @@ class LateralLayerEfficientNetwork1L(nn.Module):
     def get_layer_weights(self):
         return {"S2": self.s2.get_weights()}
 
-    def forward(self, x: Tensor) -> Tuple[Tensor, Tensor]:
+    def forward(self, x: Tensor, require_grad: bool = False) -> Tuple[Tensor, Tensor]:
         """
         Forward pass over multiple timesteps
         :param x: The input tensor (extracted features of the image)
@@ -351,8 +362,7 @@ class LateralLayerEfficientNetwork1L(nn.Module):
         extractor), Features extracted by the lateral layers (binarized), Features extracted by the lateral layers (as
         float)
         """
-        with torch.no_grad():
-            act, act_bin, logs = self.s2(x)
+        act, act_bin, logs = self.s2(x, require_grad=require_grad)
         for k, v in logs.items():
             if k not in self.avg_value_meter:
                 self.avg_value_meter[k] = AverageMeter()
@@ -410,8 +420,8 @@ class LateralNetwork(pl.LightningModule):
         self.fabric = fabric
         self.model = self.configure_model()
 
-    def forward(self, x: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
-        return self.model.forward(x)
+    def forward(self, x: Tensor, require_grad: bool = False) -> Tuple[Tensor, Tensor, Tensor]:
+        return self.model.forward(x, require_grad=require_grad)
 
     def new_sample(self):
         self.model.new_sample()

@@ -217,7 +217,7 @@ class FixedFilterFeatureExtractor(pl.LightningModule):
         """
         return self.model(x)
 
-    def configure_model(self) -> nn.Module:
+    def configure_model(self) -> nn.Module: # type: ignore
         """
         Create and configure the Conv2dFixedFilters model instance.
         
@@ -227,7 +227,7 @@ class FixedFilterFeatureExtractor(pl.LightningModule):
         Returns:
             nn.Module: Configured Conv2dFixedFilters instance ready for feature extraction.
         """
-        return Conv2dFixedFilters(self.fabric, **self.conf['feature_extractor']['s1_params'])
+        return Conv2dFixedFilters(self.fabric, **self.conf['feature_extractor']['s1_params']) # type: ignore
 
     def plot_model_weights(self, show_plot: Optional[bool] = False) -> List[Path]:
         """
@@ -293,3 +293,92 @@ class FixedFilterFeatureExtractor(pl.LightningModule):
             plt.close()
         return files
 
+
+class Conv2dAlternatingFilters(Conv2dFixedFilters):
+    """
+    Learnable variant of Conv2dFixedFilters. Identical interface and behaviour,
+    but weights are trainable and initialised from the fixed filters.
+    """
+
+    def __init__(
+        self,
+        fabric: Fabric,
+        use_larger_weights: Optional[bool] = False,
+        threshold_f: Optional[str] = "None",
+    ):
+        super().__init__(fabric, use_larger_weights=use_larger_weights, threshold_f=threshold_f)
+        self.weight = nn.Parameter(self.weight.clone().detach(), requires_grad=True)
+
+    def apply_activation(self, a: Tensor) -> Tensor:
+        """
+        Apply the configured activation function to convolved features.
+        
+        Applies one of three activation strategies: ReLU (keep positive values),
+        binary thresholding (convert to 0 or 1), or stochastic Bernoulli sampling.
+        For binary thresholding, a straight-through estimator (STE) is used:
+        the forward pass outputs hard binary activations, while the backward pass
+        uses an identity-like gradient so training can still update upstream
+        parameters despite the non-differentiable threshold.
+        The specific function is determined by the threshold_f parameter set
+        during initialization.
+        
+        Args:
+            a (Tensor): Feature tensor from convolution of shape (batch, filters, height, width).
+        
+        Returns:
+            Tensor: Activated features of the same shape as input.
+        """
+
+        if self.threshold_f == "None":
+            return torch.where(a > 0, a, 0.)
+        elif self.threshold_f == "threshold":
+            a_binary = torch.where(a > 0, 1., 0.)
+            return a_binary.detach() + a - a.detach()
+        elif self.threshold_f == "bernoulli":
+            return torch.bernoulli(torch.clip(a, 0, 1))
+        raise ValueError(f"Unknown threshold_f: {self.threshold_f}")
+
+
+class AlternatingFeatureExtractor(FixedFilterFeatureExtractor):
+    """
+    Feature extractor backed by Conv2dAlternatingFilters (learnable weights).
+    Inherits all Lightning plumbing and plot_model_weights from
+    FixedFilterFeatureExtractor; only configure_model is overridden.
+    """
+
+    def configure_model(self) -> nn.Module:
+        """
+        Instantiate a Conv2dAlternatingFilters model from the run configuration.
+
+        Returns:
+            nn.Module: Configured Conv2dAlternatingFilters instance.
+        """
+        return Conv2dAlternatingFilters(self.fabric, **self.conf['feature_extractor']['s1_params']) # type: ignore
+        
+    def setup_logging(self, init_weights: Tensor) -> None:
+        """Call once after setup to register the reference weights for drift tracking."""
+        self._avg_value_meter = {}
+        self._s1_init_weights = init_weights.clone().detach()
+
+    def log_step(self, s1_loss: float, z_float: Tensor) -> None:
+        """Call once per batch during training to accumulate stats."""
+        from utils.meters import AverageMeter
+        coherence = z_float.mean().item()
+        drift = (self.model.weight - self._s1_init_weights).norm().item()
+        for k, v in [("S1/loss", s1_loss), ("S1/s2_coherence", coherence), ("S1/weight_drift", drift)]:
+            if k not in self._avg_value_meter:
+                self._avg_value_meter[k] = AverageMeter()
+            self._avg_value_meter[k](v)
+
+    def get_and_reset_logs(self) -> Dict[str, float]:
+        logs = {}
+        for k, v in self._avg_value_meter.items():
+            logs[k] = v.mean
+            v.reset()
+        # Current weight stats (not averaged, just snapshot)
+        w = self.model.weight.detach()
+        logs["S1/weight_mean"] = w.mean().item()
+        logs["S1/weight_std"] = w.std().item()
+        logs["S1/weight_min"] = w.min().item()
+        logs["S1/weight_max"] = w.max().item()
+        return logs

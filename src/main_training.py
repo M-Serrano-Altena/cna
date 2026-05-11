@@ -14,7 +14,7 @@ from data.loader import loaders_from_config
 from models.s1 import FixedFilterFeatureExtractor
 from models.s2_fragments import LateralNetwork
 from utils.config import get_config
-from utils.custom_print import print_start, print_warn
+from utils.custom_print import print_start, print_warn, print_logs
 from utils.loggers import loggers_from_conf
 from utils.store_load_run import load_run, save_run
 
@@ -59,12 +59,6 @@ def parse_args(parser: Optional[argparse.ArgumentParser] = None):
                         type=str,
                         dest='run:load_state_path',
                         help='Path from where the model will be loaded'
-                        )
-    parser.add_argument('--learn_s1',
-                        action='store_true',
-                        default=False,
-                        dest='feature_extractor:learn_s1',
-                        help='Whether to learn the S1 filters (instead of using fixed filters)'
                         )
     # parser.add_argument('--ts',
     #                     type=int,
@@ -156,7 +150,7 @@ def setup_dataloader(config: Dict[str, Optional[Any]], fabric: Fabric) -> tuple[
     return train_loader, eval_loader
 
 
-def setup_feature_extractor(config: Dict[str, Optional[Any]], fabric: Fabric) -> pl.LightningModule:
+def setup_feature_extractor(config: Dict[str, Any], fabric: Fabric) -> tuple[pl.LightningModule, Optional[torch.optim.Optimizer]]:
     """
     Initialize the feature extractor model for visual processing.
     
@@ -164,24 +158,53 @@ def setup_feature_extractor(config: Dict[str, Optional[Any]], fabric: Fabric) ->
     before feeding them into the lateral network. Optionally learns S1 filters if enabled in config.
     
     Args:
-        config (Dict[str, Optional[Any]]): Configuration dictionary.
+        config (Dict[str,Any]): Configuration dictionary.
         fabric (Fabric): Initialized Lightning Fabric instance.
     
     Returns:
-        pl.LightningModule: Feature extractor model wrapped for training.
+        tuple[pl.LightningModule, Optional[torch.optim.Optimizer]]: Feature extractor model and optimizer wrapped for training.
     """
-    feature_extractor = FixedFilterFeatureExtractor(config, fabric)
-    feature_extractor = fabric.setup(feature_extractor)
-    return feature_extractor
+    default_feature_extractor_config = {
+        'out_channels': 4,
+        'learn_s1': False,
+        's1_params': {
+            'use_larger_weights': False,
+            'threshold_f': 'threshold'
+        },
+        'lr': 1e-3
+    }
+    feature_extractor_config = config.get('feature_extractor', default_feature_extractor_config)
+    if not isinstance(feature_extractor_config, dict):
+        print_warn("Invalid feature extractor config. Using default fixed filters.", title="Config Warning")
+        feature_extractor_config = default_feature_extractor_config
+        
+    # fixed feature extraction (non-learnable S1 filters)
+    if not feature_extractor_config.get('learn_s1', default_feature_extractor_config['learn_s1']):
+        feature_extractor = FixedFilterFeatureExtractor(config, fabric)
+        feature_extractor = fabric.setup(feature_extractor)
+        return feature_extractor, None
+    
+    # learnable S1 filters
+    from models.s1 import AlternatingFeatureExtractor
+    feature_extractor = AlternatingFeatureExtractor(config, fabric)
+    optimizer = torch.optim.Adam(
+        feature_extractor.parameters(),
+        lr=feature_extractor_config.get('lr', default_feature_extractor_config['lr'])
+    )
+    feature_extractor, optimizer = fabric.setup(feature_extractor, optimizer)
+    return feature_extractor, optimizer
+
 
 
 def cycle(
         config: Dict[str, Optional[Any]],
+        fabric: Fabric,
         feature_extractor: pl.LightningModule,
         lateral_network: LateralNetwork,
         batch: Tensor,
         store_tensors: Optional[bool] = False,
         mode: Optional[str] = "train",
+        s1_optimizer: Optional[torch.optim.Optimizer] = None
 ) -> Optional[tuple[Tensor, Tensor, Tensor, Tensor]]:
     """
     Execute a single forward pass through feature extraction and lateral network processing.
@@ -197,6 +220,7 @@ def cycle(
         batch (Tensor): Input images batch.
         store_tensors (Optional[bool]): Whether to store and return intermediate tensors. Defaults to False.
         mode (Optional[str]): Execution mode, either "train" or "eval". Defaults to "train".
+        s1_optimizer (Optional[torch.optim.Optimizer]): Optimizer for the S1 layer, used during training if learn_s1 is True. Defaults to None.
     
     Returns:
         Optional[tuple[Tensor, Tensor, Tensor, Tensor]]: When store_tensors=True, returns tuple of
@@ -205,12 +229,17 @@ def cycle(
     """
     assert mode in ["train", "eval"], "Mode must be either train or eval"
 
-    with torch.no_grad():
+    learn_s1 = s1_optimizer is not None
+    require_grad = learn_s1 and mode == "train"
+
+    # Feature extraction: with grad only if we're learning S1
+    with torch.set_grad_enabled(require_grad):
         features = feature_extractor(batch)
 
     z = None
+    z_float = None
 
-    input_features, lateral_features, lateral_features_f, l2_features, l2h_features = [], [], [], [], []
+    input_features, lateral_features, lateral_features_f= [], [], []
     for view_idx in range(features.shape[1]):
         x_view_features = features[:, view_idx, ...]
 
@@ -218,15 +247,18 @@ def cycle(
             input_features.append(x_view_features)
 
         if z is None:
-            z = torch.zeros((x_view_features.shape[0], lateral_network.model.out_channels, x_view_features.shape[2],
-                             x_view_features.shape[3]), device=batch.device)
+            z = torch.zeros(
+                (x_view_features.shape[0], lateral_network.model.out_channels,
+                 x_view_features.shape[2], x_view_features.shape[3]),
+                device=batch.device
+            )
+
 
         features_lat, features_lat_float = [], []
         for t in range(config["lateral_model"]["max_timesteps"]):
             lateral_network.model.update_ts(t)
             x_in = torch.cat([x_view_features, z], dim=1)
-            z_float, z = lateral_network(x_in)
-
+            z_float, z = lateral_network(x_in, require_grad=require_grad)
             features_lat.append(z)
             if store_tensors:
                 features_lat_float.append(z_float)
@@ -237,10 +269,20 @@ def cycle(
             features_lat_float = torch.stack(features_lat_float, dim=1)
 
         if mode == "train":
-            # Train at the end after all timesteps (use median activation per cell),
+            # S2 Hebbian update after all timesteps (use median activation per cell),
             x_rearranged = lateral_network.model.s2.rearrange_input(
                 torch.cat([x_view_features, features_lat_median], dim=1))
             lateral_network.model.s2.hebbian_update(x_rearranged, features_lat_median)
+
+            # S1 gradient update if learn_s1 is enabled: maximize coherence of S2 output
+            if learn_s1 and z_float is not None:
+                s1_loss = -z_float.mean()
+                s1_optimizer.zero_grad()
+                fabric.backward(s1_loss)
+                s1_optimizer.step()
+                if hasattr(feature_extractor, "log_step"):
+                    feature_extractor.log_step(s1_loss.item(), z_float.detach())
+
 
         if store_tensors:
             features_lat_float_median = torch.median(features_lat_float, dim=1)[0]
@@ -250,16 +292,22 @@ def cycle(
             lateral_features_f.append(features_lat_float)
 
     if store_tensors:
-        return features, torch.stack(input_features, dim=1), torch.stack(lateral_features, dim=1), torch.stack(
-            lateral_features_f, dim=1)
+        return (
+            features,
+            torch.stack(input_features, dim=1),
+            torch.stack(lateral_features, dim=1),
+            torch.stack(lateral_features_f, dim=1),
+        )
 
 
 def single_train_epoch(
         config: Dict[str, Optional[Any]],
+        fabric: Fabric,
         feature_extractor: pl.LightningModule,
         lateral_network: LateralNetwork,
         train_loader: DataLoader,
         epoch: int,
+        s1_optimizer: Optional[torch.optim.Optimizer] = None
 ) -> None:
     """
     Execute a single training epoch over the full training dataset.
@@ -269,26 +317,35 @@ def single_train_epoch(
     
     Args:
         config (Dict[str, Optional[Any]]): Configuration dictionary.
+        fabric (Fabric): Initialized Lightning Fabric instance.
         feature_extractor (pl.LightningModule): Feature extractor model.
         lateral_network (LateralNetwork): Lateral network model.
         train_loader (DataLoader): Training dataset loader.
         epoch (int): Current epoch number.
+        s1_optimizer (Optional[torch.optim.Optimizer]): Optimizer for S1 layer updates.
     """
-    feature_extractor.eval()
+    learn_s1 = s1_optimizer is not None
+    if learn_s1:
+        feature_extractor.train()
+    else:
+        feature_extractor.eval()
+
     lateral_network.eval()
     for i, batch in tqdm(enumerate(train_loader),
                          total=len(train_loader),
                          colour="GREEN",
                          desc=f"Train Epoch {epoch}/{config['run']['n_epochs']}"):
-        cycle(config, feature_extractor, lateral_network, batch[0], store_tensors=False, mode="train")
+        cycle(config, fabric, feature_extractor, lateral_network, batch[0], store_tensors=False, mode="train", s1_optimizer=s1_optimizer)
 
 
 def single_eval_epoch(
         config: Dict[str, Optional[Any]],
+        fabric: Fabric,
         feature_extractor: pl.LightningModule,
         lateral_network: LateralNetwork,
         test_loader: DataLoader,
         epoch: int,
+        s1_optimizer: Optional[torch.optim.Optimizer] = None
 ) -> None:
     """
     Evaluate the model on test set and optionally generate visualizations.
@@ -298,10 +355,12 @@ def single_eval_epoch(
     
     Args:
         config (Dict[str, Optional[Any]]): Configuration dictionary.
+        fabric (Fabric): Initialized Lightning Fabric instance.
         feature_extractor (pl.LightningModule): Feature extractor model.
         lateral_network (LateralNetwork): Lateral network model.
         test_loader (DataLoader): Test dataset loader.
         epoch (int): Current epoch number.
+        s1_optimizer (Optional[torch.optim.Optimizer]): Optimizer for S1 layer updates.
     """
     feature_extractor.eval()
     lateral_network.eval()
@@ -312,11 +371,13 @@ def single_eval_epoch(
                          desc=f"Testing Epoch {epoch}/{config['run']['n_epochs']}"):
         with torch.no_grad():
             features, input_features, lateral_features, lateral_features_f = cycle(config,
+                                                                                   fabric,
                                                                                    feature_extractor,
                                                                                    lateral_network,
                                                                                    batch[0],
                                                                                    store_tensors=True,
-                                                                                   mode="eval")
+                                                                                   mode="eval",
+                                                                                   s1_optimizer=s1_optimizer)
             plt_img.append(batch[0])
             plt_features.append(features)
             plt_input_features.append(input_features)
@@ -350,10 +411,12 @@ def single_eval_epoch(
 
 def train(
         config: Dict[str, Optional[Any]],
+        fabric: Fabric,
         feature_extractor: pl.LightningModule,
         lateral_network: LateralNetwork,
         train_loader: DataLoader,
         test_loader: DataLoader,
+        s1_optimizer: Optional[torch.optim.Optimizer] = None
 ) -> None:
     """
     Main training loop over all epochs.
@@ -363,21 +426,29 @@ def train(
     
     Args:
         config (Dict[str, Optional[Any]]): Configuration dictionary.
+        fabric (Fabric): Initialized Lightning Fabric instance.
         feature_extractor (pl.LightningModule): Feature extractor module.
         lateral_network (LateralNetwork): Lateral network module.
         train_loader (DataLoader): Training dataset loader.
         test_loader (DataLoader): Test dataset loader.
+        s1_optimizer (Optional[torch.optim.Optimizer]): Optimizer for S1 layer updates.
     """
     start_epoch = config['run']['current_epoch']
 
     if config['logging']['wandb']['active'] or config['run']['plots']['enable']:
-        single_eval_epoch(config, feature_extractor, lateral_network, test_loader, 0)
+        single_eval_epoch(config, fabric, feature_extractor, lateral_network, test_loader, 0)
         lateral_network.on_epoch_end()  # print logs
 
     for epoch in range(start_epoch, config['run']['n_epochs']):
-        single_train_epoch(config, feature_extractor, lateral_network, train_loader, epoch + 1)
-        single_eval_epoch(config, feature_extractor, lateral_network, test_loader, epoch + 1)
+        single_train_epoch(config, fabric, feature_extractor, lateral_network, train_loader, epoch + 1, s1_optimizer=s1_optimizer)
+        single_eval_epoch(config, fabric, feature_extractor, lateral_network, test_loader, epoch + 1)
+        
         lateral_network.on_epoch_end()
+        if hasattr(feature_extractor, "get_and_reset_logs"):
+            s1_logs = feature_extractor.get_and_reset_logs()
+            feature_extractor.log_dict(s1_logs)
+            print_logs(s1_logs)
+
         config['run']['current_epoch'] = epoch + 1
 
 
@@ -411,8 +482,11 @@ def main() -> None:
     config = configure()
     fabric = setup_fabric(config)
     train_loader, test_loader = setup_dataloader(config, fabric)
-    feature_extractor = setup_feature_extractor(config, fabric)
+    feature_extractor, s1_optimizer = setup_feature_extractor(config, fabric)
     lateral_network = setup_lateral_network(config, fabric)
+
+    if s1_optimizer is not None and hasattr(feature_extractor, "setup_logging"):
+        feature_extractor.setup_logging(feature_extractor.model.weight.detach())
 
     if 'load_state_path' in config['run'] and config['run']['load_state_path'] != 'None':
         config, state = load_run(config, fabric)
@@ -427,7 +501,7 @@ def main() -> None:
             fp.mkdir(parents=True, exist_ok=True)
 
     setup_wandb(config)
-    train(config, feature_extractor, lateral_network, train_loader, test_loader)
+    train(config, fabric, feature_extractor, lateral_network, train_loader, test_loader, s1_optimizer=s1_optimizer)
 
     if 'store_state_path' in config['run'] and config['run']['store_state_path'] is not None and config['run'][
         'store_state_path'] != 'None':
