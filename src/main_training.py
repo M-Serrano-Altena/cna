@@ -274,14 +274,25 @@ def cycle(
                 torch.cat([x_view_features, features_lat_median], dim=1))
             lateral_network.model.s2.hebbian_update(x_rearranged, features_lat_median)
 
-            # S1 gradient update if learn_s1 is enabled: maximize coherence of S2 output
+            # S1 gradient update if learn_s1 is enabled:
+            # maximize difference between active and inactive neurons using the final timestep activations as feedback
             if learn_s1 and z_float is not None:
-                s1_loss = -z_float.mean()
+
+                active_mask = z > 0  # z is the binary output
+                if active_mask.any() and (~active_mask).any():
+                    s1_loss = -(z_float[active_mask].mean() - z_float[~active_mask].mean())
+                else:
+                    s1_loss = -z_float.mean()  # fallback if all active or all inactive
+
                 s1_optimizer.zero_grad()
                 fabric.backward(s1_loss)
                 s1_optimizer.step()
                 if hasattr(feature_extractor, "log_step"):
-                    feature_extractor.log_step(s1_loss.item(), z_float.detach())
+                    feature_extractor.log_step(s1_loss.item(), z_float.detach(), z.detach())
+            else:
+                # Log S2 coherence even for fixed S1 to track S2 evolution
+                if hasattr(feature_extractor, "log_step"):
+                    feature_extractor.log_step(None, z_float.detach(), z.detach())
 
 
         if store_tensors:
@@ -485,13 +496,14 @@ def main() -> None:
     feature_extractor, s1_optimizer = setup_feature_extractor(config, fabric)
     lateral_network = setup_lateral_network(config, fabric)
 
-    if s1_optimizer is not None and hasattr(feature_extractor, "setup_logging"):
-        feature_extractor.setup_logging(feature_extractor.model.weight.detach())
-
     if 'load_state_path' in config['run'] and config['run']['load_state_path'] != 'None':
         config, state = load_run(config, fabric)
         feature_extractor.load_state_dict(state['feature_extractor'])
         lateral_network.load_state_dict(state['lateral_network'])
+
+    if hasattr(feature_extractor, "setup_logging"):
+        init_weights = feature_extractor.model.weight.detach() if s1_optimizer is not None else None
+        feature_extractor.setup_logging(init_weights)
 
     feature_extractor.eval()  # does not have to be trained
     if 'store_path' in config['run']['plots'] and config['run']['plots']['store_path'] is not None and \

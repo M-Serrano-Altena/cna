@@ -125,7 +125,7 @@ def load_models() -> Tuple[Dict[str, Any], Fabric, pl.LightningModule, pl.Lightn
     """
     config = configure(parse_args())
     fabric = setup_fabric(config)
-    feature_extractor = setup_feature_extractor(config, fabric)
+    feature_extractor, _ = setup_feature_extractor(config, fabric)
     if 'lateral_model' in config:
         model = setup_lateral_network(config, fabric)
     else:

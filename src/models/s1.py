@@ -229,6 +229,57 @@ class FixedFilterFeatureExtractor(pl.LightningModule):
         """
         return Conv2dFixedFilters(self.fabric, **self.conf['feature_extractor']['s1_params']) # type: ignore
 
+    def setup_logging(self, init_weights: Optional[Tensor] = None) -> None:
+        """Initialize logging infrastructure for S2 comparison metrics.
+
+        For fixed filters, drift tracking is not applicable, but active/inactive
+        coherence tracking is still useful for comparing S2 behavior across runs.
+
+        Args:
+            init_weights (Optional[Tensor]): Initial weights (unused for fixed filters).
+        """
+        self._avg_value_meter = {}
+
+    def log_step(self, s1_loss: Optional[float], z_float: Tensor, z_bin: Tensor) -> None:
+        """Track S2 comparison metrics during training.
+
+        For fixed S1, we log the active/inactive output means and their gap,
+        but not S1 loss or drift (which do not apply to fixed filters).
+
+        Args:
+            s1_loss (Optional[float]): S1 loss (ignored for fixed filters).
+            z_float (Tensor): S2 output activations before binarization.
+            z_bin (Tensor): Binary S2 activations used to define active/inactive sets.
+        """
+        from utils.meters import AverageMeter
+        active_mask = z_bin > 0
+        inactive_mask = ~active_mask
+
+        active_mean = z_float[active_mask].mean().item() if active_mask.any() else z_float.mean().item()
+        inactive_mean = z_float[inactive_mask].mean().item() if inactive_mask.any() else z_float.mean().item()
+        coherence_gap = active_mean - inactive_mean
+
+        for k, v in [
+            ("S1/active_mean", active_mean),
+            ("S1/inactive_mean", inactive_mean),
+            ("S1/coherence_gap", coherence_gap),
+        ]:
+            if k not in self._avg_value_meter:
+                self._avg_value_meter[k] = AverageMeter()
+            self._avg_value_meter[k](v)
+
+    def get_and_reset_logs(self) -> Dict[str, float]:
+        """Get accumulated metrics and reset for next epoch.
+        
+        Returns:
+            Dict[str, float]: Dictionary with S2 coherence metric.
+        """
+        logs = {}
+        for k, v in self._avg_value_meter.items():
+            logs[k] = v.mean
+            v.reset()
+        return logs
+
     def plot_model_weights(self, show_plot: Optional[bool] = False) -> List[Path]:
         """
         Generate and save visualizations of the model filter weights.
@@ -360,12 +411,23 @@ class AlternatingFeatureExtractor(FixedFilterFeatureExtractor):
         self._avg_value_meter = {}
         self._s1_init_weights = init_weights.clone().detach()
 
-    def log_step(self, s1_loss: float, z_float: Tensor) -> None:
+    def log_step(self, s1_loss: float, z_float: Tensor, z_bin: Tensor) -> None:
         """Call once per batch during training to accumulate stats."""
         from utils.meters import AverageMeter
-        coherence = z_float.mean().item()
+        active_mask = z_bin > 0
+        inactive_mask = ~active_mask
+
+        active_mean = z_float[active_mask].mean().item() if active_mask.any() else z_float.mean().item()
+        inactive_mean = z_float[inactive_mask].mean().item() if inactive_mask.any() else z_float.mean().item()
+        coherence_gap = active_mean - inactive_mean
         drift = (self.model.weight - self._s1_init_weights).norm().item()
-        for k, v in [("S1/loss", s1_loss), ("S1/s2_coherence", coherence), ("S1/weight_drift", drift)]:
+        for k, v in [
+            ("S1/loss", s1_loss),
+            ("S1/active_mean", active_mean),
+            ("S1/inactive_mean", inactive_mean),
+            ("S1/coherence_gap", coherence_gap),
+            ("S1/weight_drift", drift),
+        ]:
             if k not in self._avg_value_meter:
                 self._avg_value_meter[k] = AverageMeter()
             self._avg_value_meter[k](v)
