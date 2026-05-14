@@ -8,6 +8,7 @@ import wandb
 from lightning import Fabric
 from torch import Tensor
 from torch.utils.data import DataLoader
+import torch.nn.functional as F
 from tqdm import tqdm
 from copy import deepcopy
 
@@ -283,15 +284,14 @@ def cycle(
 
                 if fixed_extractor is not None:
                     with torch.no_grad():
-                        fixed_active = (fixed_extractor(batch) > 0).float()  # reference mask
+                        target_logits = fixed_extractor.get_logits(batch)
+                        target_logits_norm = F.normalize(target_logits, dim=1)
 
-                    # print(f"Dim fixed active: {fixed_active.shape}, Dim z_float: {z_float.shape}, View idx: {view_idx}, Dim features: {features.shape}")
+                    learned_logits = feature_extractor.get_logits(batch)
+                    learned_logits_norm = F.normalize(learned_logits, dim=1)
 
-                    fixed_view = fixed_active[:, view_idx].max(dim=1, keepdim=True)[0]  # max over channels to get a single active/inactive mask per spatial location
+                    s1_loss = F.mse_loss(learned_logits_norm, target_logits_norm)
 
-                    # reward high S2 support where fixed filters fire, penalise elsewhere
-                    s1_loss = -(z_float * fixed_view).mean() \
-                            + (z_float * (1 - fixed_view)).mean()
 
                 else:
                     active_mask = z > 0  # z is the binary output
@@ -299,7 +299,10 @@ def cycle(
                         s1_loss = -(z_float[active_mask].mean() - z_float[~active_mask].mean())
                     else:
                         s1_loss = -z_float.mean()  # fallback if all active or all inactive
-
+                
+                l2 = 1e-4 * (feature_extractor.model.weight ** 2).mean()
+                print_logs({"s1_loss": s1_loss.item(), "s1_weight_l2": l2})
+                s1_loss = s1_loss + l2
                 s1_optimizer.zero_grad()
                 fabric.backward(s1_loss)
                 s1_optimizer.step()
@@ -308,7 +311,7 @@ def cycle(
             else:
                 # Log S2 coherence even for fixed S1 to track S2 evolution
                 if hasattr(feature_extractor, "log_step"):
-                    feature_extractor.log_step(None, z_float.detach(), z.detach())
+                    feature_extractor.log_step(torch.tensor(0.0), z_float.detach(), z.detach())
 
 
         if store_tensors:
@@ -441,6 +444,101 @@ def single_eval_epoch(
             wandb.log(logs | {"epoch": epoch, "trainer/global_step": epoch})
 
 
+
+def single_train_epoch_s1_only(
+    config: Dict[str, Optional[Any]],
+    fabric: Fabric,
+    feature_extractor: pl.LightningModule,
+    fixed_extractor: pl.LightningModule,
+    train_loader: DataLoader,
+    epoch: int,
+    s1_optimizer: torch.optim.Optimizer,
+) -> None:
+    feature_extractor.train()
+    s1_loss = torch.tensor(0.0)
+    l2 = torch.tensor(0.0)
+    
+    for i, batch in tqdm(enumerate(train_loader),
+                         total=len(train_loader),
+                         colour="GREEN",
+                         desc=f"Train S1 Only Epoch {epoch}/{config['run']['n_epochs']}"):
+        with torch.no_grad():
+            target_logits = fixed_extractor.get_logits(batch[0])
+            target_logits_norm = F.normalize(target_logits, dim=1)
+
+        learned_logits = feature_extractor.get_logits(batch[0])
+        learned_logits_norm = F.normalize(learned_logits, dim=1)
+
+        s1_loss = F.mse_loss(learned_logits_norm, target_logits_norm)
+        l2 = (feature_extractor.model.weight ** 2).mean()
+        s1_loss = s1_loss + l2
+        s1_optimizer.zero_grad()
+        fabric.backward(s1_loss)
+        s1_optimizer.step()
+
+    print_logs({"s1_loss": s1_loss.item(), "s1_weight_l2": l2})
+    
+
+
+
+def train_s1_only(
+    config: Dict[str, Optional[Any]],
+    fabric: Fabric,
+    feature_extractor: pl.LightningModule,
+    fixed_extractor: pl.LightningModule,
+    train_loader: DataLoader,
+    s1_optimizer: torch.optim.Optimizer,
+) -> None:
+    start_epoch = config['run']['current_epoch']
+
+    for epoch in range(start_epoch, config['run']['n_epochs']):
+        single_train_epoch_s1_only(config, fabric, feature_extractor, fixed_extractor, train_loader, epoch + 1, s1_optimizer=s1_optimizer)
+        
+        if hasattr(feature_extractor, "get_and_reset_logs"):
+            s1_logs = feature_extractor.get_and_reset_logs()
+            feature_extractor.log_dict(s1_logs)
+            print_logs(s1_logs)
+
+        config['run']['current_epoch'] = epoch + 1
+
+    # reset epoch to 0 for potential subsequent training phases (e.g. training S2 after S1)
+    config['run']['current_epoch'] = start_epoch
+
+
+def compare_s1_feature_extraction(
+    learned_extractor: pl.LightningModule,
+    fixed_extractor: pl.LightningModule,
+    dataloader: DataLoader,
+    n_batches: int = 5,
+) -> float:
+    """
+    Compare learned S1 vs fixed S1 by computing MSE between normalized, flattened logits
+    on the first `n_batches` from `dataloader`. Logs per-batch and average MSE.
+    """
+    learned_extractor.eval()
+    fixed_extractor.eval()
+    device = next(learned_extractor.parameters()).device
+    total_mse = 0.0
+    seen = 0
+    for i, batch in enumerate(dataloader):
+        if i >= n_batches:
+            break
+        x = batch[0].to(device)
+        with torch.no_grad():
+            tgt = fixed_extractor.get_logits(x)
+            src = learned_extractor.get_logits(x)
+            # flatten per-sample (handles 4D or 5D logits) and normalize
+            tgt_f = F.normalize(tgt.view(tgt.size(0), -1), dim=1)
+            src_f = F.normalize(src.view(src.size(0), -1), dim=1)
+            mse = F.mse_loss(src_f, tgt_f).item()
+        print_logs({f"s1_compare_batch_{i}_mse": mse})
+        total_mse += mse
+        seen += 1
+    avg = total_mse / seen if seen else 0.0
+    print_logs({"s1_compare_mse_avg": avg})
+    return avg
+
+
 def train(
         config: Dict[str, Optional[Any]],
         fabric: Fabric,
@@ -542,7 +640,14 @@ def main() -> None:
             fp.mkdir(parents=True, exist_ok=True)
 
     setup_wandb(config)
-    train(config, fabric, feature_extractor, lateral_network, train_loader, test_loader, s1_optimizer=s1_optimizer, fixed_extractor=fixed_extractor)
+
+    # Train S1 filters alone for a few epochs if learn_s1 is enabled, to stabilize S1 representations before training S2 with Hebbian updates.
+    # This can help prevent instability in early training when both S1 and S2 are learning simultaneously from random initializations.
+    if s1_optimizer is not None and fixed_extractor is not None and config['feature_extractor'].get('learn_s1', False):
+        train_s1_only(config, fabric, feature_extractor, fixed_extractor, train_loader, s1_optimizer)
+
+    # train S2 while fixing S1
+    train(config, fabric, feature_extractor, lateral_network, train_loader, test_loader, s1_optimizer=None, fixed_extractor=fixed_extractor)
 
     if 'store_state_path' in config['run'] and config['run']['store_state_path'] is not None and config['run'][
         'store_state_path'] != 'None':

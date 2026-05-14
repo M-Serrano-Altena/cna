@@ -154,6 +154,27 @@ class Conv2dFixedFilters(nn.Module):
         elif self.threshold_f == "bernoulli":
             return torch.bernoulli(torch.clip(a, 0, 1))
 
+    def get_logits(self, x: Tensor) -> Tensor:
+        """
+        Get pre-activation (pre-threshold) logits from the input.
+        
+        Applies convolution and returns raw output before any activation function.
+        Handles both 4D and 5D inputs by processing each frame independently.
+        
+        Args:
+            x (Tensor): Input tensor, either 4D or 5D shape.
+        
+        Returns:
+            Tensor: Raw convolution output (logits) before activation.
+        """
+        if len(x.shape) == 5:
+            result = []
+            for idx in range(x.shape[1]):
+                result.append(self.apply_conv(x[:, idx, ...]))
+            return torch.stack(result, dim=1)
+        else:
+            return self.apply_conv(x).unsqueeze(1)
+
     def forward(self, x: Tensor) -> Tensor:
         """
         Execute the forward pass through the fixed-filter feature extractor.
@@ -169,14 +190,8 @@ class Conv2dFixedFilters(nn.Module):
         Returns:
             Tensor: Extracted and activated features with added filter dimension.
         """
-        if len(x.shape) == 5:
-            result = []
-            for idx in range(x.shape[1]):
-                result.append(self.apply_conv(x[:, idx, ...]))
-            a = torch.stack(result, dim=1)
-        else:
-            a = self.apply_conv(x).unsqueeze(1)
-        return self.apply_activation(a)
+        logits = self.get_logits(x)
+        return self.apply_activation(logits)
 
 
 class FixedFilterFeatureExtractor(pl.LightningModule):
@@ -201,6 +216,23 @@ class FixedFilterFeatureExtractor(pl.LightningModule):
         self.conf = conf
         self.fabric = fabric
         self.model = self.configure_model()
+
+
+    def get_logits(self, x: Tensor) -> Tensor:
+        """
+        Get pre-activation (pre-threshold) logits from the input.
+        
+        Delegates to the underlying Conv2dFixedFilters model to compute raw convolution
+        outputs before any activation function is applied. Handles both 4D and 5D
+        inputs by processing each frame independently.
+        
+        Args:
+            x (Tensor): Input tensor, either 4D or 5D shape.
+        
+        Returns:
+            Tensor: Raw convolution output (logits) before activation.
+        """
+        return self.model.get_logits(x)
 
     def forward(self, x: Tensor) -> Tensor:
         """
@@ -358,7 +390,7 @@ class Conv2dAlternatingFilters(Conv2dFixedFilters):
         threshold_f: Optional[str] = "None",
     ):
         super().__init__(fabric, use_larger_weights=use_larger_weights, threshold_f=threshold_f)
-        self.weight = nn.Parameter(self.weight.clone().detach(), requires_grad=True)
+        self.weight = nn.Parameter(self.weight.clone().detach() + torch.randn_like(self.weight) * 0.01, requires_grad=True)
 
     def apply_activation(self, a: Tensor) -> Tensor:
         """

@@ -19,7 +19,7 @@ run:
   plots:
     enable: True
     only_last_epoch: False
-    store_path: "results/training/"
+    store_path: "results/training/net-fragments_learn_s1/"
   store_state_path: None
   load_state_path: None
 
