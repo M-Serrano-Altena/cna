@@ -1,6 +1,6 @@
 import argparse
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, cast
 
 import lightning.pytorch as pl
 import torch
@@ -9,6 +9,7 @@ from lightning import Fabric
 from torch import Tensor
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+from copy import deepcopy
 
 from data.loader import loaders_from_config
 from models.s1 import FixedFilterFeatureExtractor
@@ -204,7 +205,8 @@ def cycle(
         batch: Tensor,
         store_tensors: Optional[bool] = False,
         mode: Optional[str] = "train",
-        s1_optimizer: Optional[torch.optim.Optimizer] = None
+        s1_optimizer: Optional[torch.optim.Optimizer] = None,
+        fixed_extractor: Optional[pl.LightningModule] = None
 ) -> Optional[tuple[Tensor, Tensor, Tensor, Tensor]]:
     """
     Execute a single forward pass through feature extraction and lateral network processing.
@@ -221,6 +223,7 @@ def cycle(
         store_tensors (Optional[bool]): Whether to store and return intermediate tensors. Defaults to False.
         mode (Optional[str]): Execution mode, either "train" or "eval". Defaults to "train".
         s1_optimizer (Optional[torch.optim.Optimizer]): Optimizer for the S1 layer, used during training if learn_s1 is True. Defaults to None.
+        fixed_extractor (Optional[pl.LightningModule]): Optional fixed feature extractor for evaluation mode when S1 is learnable. Defaults to None.
     
     Returns:
         Optional[tuple[Tensor, Tensor, Tensor, Tensor]]: When store_tensors=True, returns tuple of
@@ -278,11 +281,24 @@ def cycle(
             # maximize difference between active and inactive neurons using the final timestep activations as feedback
             if learn_s1 and z_float is not None:
 
-                active_mask = z > 0  # z is the binary output
-                if active_mask.any() and (~active_mask).any():
-                    s1_loss = -(z_float[active_mask].mean() - z_float[~active_mask].mean())
+                if fixed_extractor is not None:
+                    with torch.no_grad():
+                        fixed_active = (fixed_extractor(batch) > 0).float()  # reference mask
+
+                    # print(f"Dim fixed active: {fixed_active.shape}, Dim z_float: {z_float.shape}, View idx: {view_idx}, Dim features: {features.shape}")
+
+                    fixed_view = fixed_active[:, view_idx].max(dim=1, keepdim=True)[0]  # max over channels to get a single active/inactive mask per spatial location
+
+                    # reward high S2 support where fixed filters fire, penalise elsewhere
+                    s1_loss = -(z_float * fixed_view).mean() \
+                            + (z_float * (1 - fixed_view)).mean()
+
                 else:
-                    s1_loss = -z_float.mean()  # fallback if all active or all inactive
+                    active_mask = z > 0  # z is the binary output
+                    if active_mask.any() and (~active_mask).any():
+                        s1_loss = -(z_float[active_mask].mean() - z_float[~active_mask].mean())
+                    else:
+                        s1_loss = -z_float.mean()  # fallback if all active or all inactive
 
                 s1_optimizer.zero_grad()
                 fabric.backward(s1_loss)
@@ -318,7 +334,8 @@ def single_train_epoch(
         lateral_network: LateralNetwork,
         train_loader: DataLoader,
         epoch: int,
-        s1_optimizer: Optional[torch.optim.Optimizer] = None
+        s1_optimizer: Optional[torch.optim.Optimizer] = None,
+        fixed_extractor: Optional[pl.LightningModule] = None
 ) -> None:
     """
     Execute a single training epoch over the full training dataset.
@@ -334,6 +351,7 @@ def single_train_epoch(
         train_loader (DataLoader): Training dataset loader.
         epoch (int): Current epoch number.
         s1_optimizer (Optional[torch.optim.Optimizer]): Optimizer for S1 layer updates.
+        fixed_extractor (Optional[pl.LightningModule]): Optional fixed feature extractor for evaluation mode when S1 is learnable. Defaults to None.
     """
     learn_s1 = s1_optimizer is not None
     if learn_s1:
@@ -346,7 +364,7 @@ def single_train_epoch(
                          total=len(train_loader),
                          colour="GREEN",
                          desc=f"Train Epoch {epoch}/{config['run']['n_epochs']}"):
-        cycle(config, fabric, feature_extractor, lateral_network, batch[0], store_tensors=False, mode="train", s1_optimizer=s1_optimizer)
+        cycle(config, fabric, feature_extractor, lateral_network, batch[0], store_tensors=False, mode="train", s1_optimizer=s1_optimizer, fixed_extractor=fixed_extractor)
 
 
 def single_eval_epoch(
@@ -356,7 +374,8 @@ def single_eval_epoch(
         lateral_network: LateralNetwork,
         test_loader: DataLoader,
         epoch: int,
-        s1_optimizer: Optional[torch.optim.Optimizer] = None
+        s1_optimizer: Optional[torch.optim.Optimizer] = None,
+        fixed_extractor: Optional[pl.LightningModule] = None
 ) -> None:
     """
     Evaluate the model on test set and optionally generate visualizations.
@@ -372,6 +391,7 @@ def single_eval_epoch(
         test_loader (DataLoader): Test dataset loader.
         epoch (int): Current epoch number.
         s1_optimizer (Optional[torch.optim.Optimizer]): Optimizer for S1 layer updates.
+        fixed_extractor (Optional[pl.LightningModule]): Optional fixed feature extractor for evaluation mode when S1 is learnable. Defaults to None.
     """
     feature_extractor.eval()
     lateral_network.eval()
@@ -388,7 +408,8 @@ def single_eval_epoch(
                                                                                    batch[0],
                                                                                    store_tensors=True,
                                                                                    mode="eval",
-                                                                                   s1_optimizer=s1_optimizer)
+                                                                                   s1_optimizer=s1_optimizer,
+                                                                                   fixed_extractor=fixed_extractor)
             plt_img.append(batch[0])
             plt_features.append(features)
             plt_input_features.append(input_features)
@@ -427,7 +448,8 @@ def train(
         lateral_network: LateralNetwork,
         train_loader: DataLoader,
         test_loader: DataLoader,
-        s1_optimizer: Optional[torch.optim.Optimizer] = None
+        s1_optimizer: Optional[torch.optim.Optimizer] = None,
+        fixed_extractor: Optional[pl.LightningModule] = None,
 ) -> None:
     """
     Main training loop over all epochs.
@@ -443,6 +465,7 @@ def train(
         train_loader (DataLoader): Training dataset loader.
         test_loader (DataLoader): Test dataset loader.
         s1_optimizer (Optional[torch.optim.Optimizer]): Optimizer for S1 layer updates.
+        fixed_extractor (Optional[pl.LightningModule]): Optional fixed feature extractor for evaluation mode when S1 is learnable. Defaults to None.
     """
     start_epoch = config['run']['current_epoch']
 
@@ -451,7 +474,7 @@ def train(
         lateral_network.on_epoch_end()  # print logs
 
     for epoch in range(start_epoch, config['run']['n_epochs']):
-        single_train_epoch(config, fabric, feature_extractor, lateral_network, train_loader, epoch + 1, s1_optimizer=s1_optimizer)
+        single_train_epoch(config, fabric, feature_extractor, lateral_network, train_loader, epoch + 1, s1_optimizer=s1_optimizer, fixed_extractor=fixed_extractor)
         single_eval_epoch(config, fabric, feature_extractor, lateral_network, test_loader, epoch + 1)
         
         lateral_network.on_epoch_end()
@@ -496,6 +519,12 @@ def main() -> None:
     feature_extractor, s1_optimizer = setup_feature_extractor(config, fabric)
     lateral_network = setup_lateral_network(config, fabric)
 
+    fixed_extractor = None
+    if s1_optimizer is not None:
+        config_fixed = deepcopy(config)
+        config_fixed['feature_extractor']['learn_s1'] = False
+        fixed_extractor, _ = setup_feature_extractor(config_fixed, fabric)
+
     if 'load_state_path' in config['run'] and config['run']['load_state_path'] != 'None':
         config, state = load_run(config, fabric)
         feature_extractor.load_state_dict(state['feature_extractor'])
@@ -513,7 +542,7 @@ def main() -> None:
             fp.mkdir(parents=True, exist_ok=True)
 
     setup_wandb(config)
-    train(config, fabric, feature_extractor, lateral_network, train_loader, test_loader, s1_optimizer=s1_optimizer)
+    train(config, fabric, feature_extractor, lateral_network, train_loader, test_loader, s1_optimizer=s1_optimizer, fixed_extractor=fixed_extractor)
 
     if 'store_state_path' in config['run'] and config['run']['store_state_path'] is not None and config['run'][
         'store_state_path'] != 'None':

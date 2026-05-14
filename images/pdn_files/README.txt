@@ -1,0 +1,1 @@
+Open .pdn files in the program called Paint.NET
