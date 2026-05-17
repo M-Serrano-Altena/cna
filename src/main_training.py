@@ -456,7 +456,8 @@ def single_train_epoch_s1_only(
 ) -> None:
     feature_extractor.train()
     s1_loss = torch.tensor(0.0)
-    l2 = torch.tensor(0.0)
+    prior_loss = torch.tensor(0.0)
+    l1_loss = torch.tensor(0.0)
     
     for i, batch in tqdm(enumerate(train_loader),
                          total=len(train_loader),
@@ -464,19 +465,24 @@ def single_train_epoch_s1_only(
                          desc=f"Train S1 Only Epoch {epoch}/{config['run']['n_epochs']}"):
         with torch.no_grad():
             target_logits = fixed_extractor.get_logits(batch[0])
-            target_logits_norm = F.normalize(target_logits, dim=1)
 
         learned_logits = feature_extractor.get_logits(batch[0])
-        learned_logits_norm = F.normalize(learned_logits, dim=1)
 
-        s1_loss = F.mse_loss(learned_logits_norm, target_logits_norm)
-        l2 = (feature_extractor.model.weight ** 2).mean()
-        s1_loss = s1_loss + l2
+        weight = feature_extractor.model.weight
+        fixed_weight = fixed_extractor.model.weight.detach()
+
+        feature_loss = F.mse_loss(learned_logits, target_logits)
+
+        prior_loss = 1e-2 * ((weight - fixed_weight) ** 2).sum()
+
+        l1_loss = 1e-2 * weight.abs().sum()
+
+        s1_loss = feature_loss + prior_loss + l1_loss
         s1_optimizer.zero_grad()
         fabric.backward(s1_loss)
         s1_optimizer.step()
 
-    print_logs({"s1_loss": s1_loss.item(), "s1_weight_l2": l2})
+    print_logs({"s1_loss": s1_loss, "prior_loss": prior_loss, "s1_weight_l1": l1_loss})
     
 
 
@@ -503,40 +509,6 @@ def train_s1_only(
 
     # reset epoch to 0 for potential subsequent training phases (e.g. training S2 after S1)
     config['run']['current_epoch'] = start_epoch
-
-
-def compare_s1_feature_extraction(
-    learned_extractor: pl.LightningModule,
-    fixed_extractor: pl.LightningModule,
-    dataloader: DataLoader,
-    n_batches: int = 5,
-) -> float:
-    """
-    Compare learned S1 vs fixed S1 by computing MSE between normalized, flattened logits
-    on the first `n_batches` from `dataloader`. Logs per-batch and average MSE.
-    """
-    learned_extractor.eval()
-    fixed_extractor.eval()
-    device = next(learned_extractor.parameters()).device
-    total_mse = 0.0
-    seen = 0
-    for i, batch in enumerate(dataloader):
-        if i >= n_batches:
-            break
-        x = batch[0].to(device)
-        with torch.no_grad():
-            tgt = fixed_extractor.get_logits(x)
-            src = learned_extractor.get_logits(x)
-            # flatten per-sample (handles 4D or 5D logits) and normalize
-            tgt_f = F.normalize(tgt.view(tgt.size(0), -1), dim=1)
-            src_f = F.normalize(src.view(src.size(0), -1), dim=1)
-            mse = F.mse_loss(src_f, tgt_f).item()
-        print_logs({f"s1_compare_batch_{i}_mse": mse})
-        total_mse += mse
-        seen += 1
-    avg = total_mse / seen if seen else 0.0
-    print_logs({"s1_compare_mse_avg": avg})
-    return avg
 
 
 def train(
