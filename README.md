@@ -53,7 +53,7 @@ python main_evaluation.py net-framents --load  --noise  --line_interrupt  --load
 where `noise` is the noise level, `line_interrupt` is the number of interrupted lines, `act_threshold` is the activation threshold, and `square_factor` is the square factor.
 You can also use `--act_threshold bernoulli` to test with Bernoulli neurons. However, in this case, the results are based on randomness and will vary between runs. Therefore, we recommend using a fixed activation threshold, e.g. `--act_threshold 0.5`, which also makes the plots easier to comprehend.
 
-You can replace the `net-fragments` config with `autoencoder` to train and evaluate using the autoencoder model instead
+You can replace the `net-fragments` config with `autoencoder` to train and evaluate using the autoencoder model instead.
 
 ### Extension: learnable S1 layer
 
