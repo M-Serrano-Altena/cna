@@ -6,7 +6,7 @@ dataset:
   img_height: 32
   train_dataset_params:
     num_images: 300
-    uniform_sampling: False
+    uniform_sampling: True
   valid_dataset_params:
     num_images: 4
     uniform_sampling: False

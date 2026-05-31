@@ -5,7 +5,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar, Union
 
 import numpy as np
 import torch
-from data.straight_line import StraightLine
+from data.straight_line import StraightLine, UniformSlopeStraightLine
 from torch.utils.data import DataLoader, Dataset
 
 T = TypeVar('T')
@@ -15,7 +15,7 @@ _path_t = Union[str, os.PathLike, Path]
 
 
 def _get_dataset(
-        dataset_config: Optional[Dict] = None,
+        dataset_config: Dict,
 ) -> Tuple[Any, Optional[Any], Any]:
     """Build train/validation/test datasets from configuration.
 
@@ -28,7 +28,20 @@ def _get_dataset(
         Tuple[Any, Optional[Any], Any]: Instantiated datasets in the order
         ``(train_set, valid_set, test_set)``.
     """
-    train_set = StraightLine(**dataset_config['train_dataset_params'])
+    params_keys = ["train_dataset_params", "valid_dataset_params", "test_dataset_params"]
+    if not all(dataset_config.get(key) is not None for key in params_keys):
+        raise ValueError("Missing dataset parameters in configuration.")
+    
+    uniform_sampling = dataset_config["train_dataset_params"].pop("uniform_sampling", False)
+    dataset_config["valid_dataset_params"].pop("uniform_sampling", False)
+    dataset_config["test_dataset_params"].pop("uniform_sampling", False)
+    
+    
+    if uniform_sampling:
+        train_set = UniformSlopeStraightLine(**dataset_config['train_dataset_params'])
+    else:
+        train_set = StraightLine(**dataset_config['train_dataset_params'])
+
     valid_set = StraightLine(**dataset_config['valid_dataset_params'])
     test_set = StraightLine(**dataset_config['test_dataset_params'])
 

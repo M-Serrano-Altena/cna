@@ -6,10 +6,13 @@ dataset:
   img_height: 32
   train_dataset_params:
     num_images: 300
+    uniform_sampling: False
   valid_dataset_params:
     num_images: 4
+    uniform_sampling: False
   test_dataset_params:
     num_images: 60
+    uniform_sampling: False
 
 run:
   n_epochs: 101

@@ -55,7 +55,11 @@ Raises:
         If `transfer_mode` is not explicitly set to 'upload' or 'download'.
 
 Notes:
-    - The credentials file must contain valid authentication details for the selected cluster.
+    - The credentials file must contain valid authentication details for the selected cluster. 
+        See the credentials/example_credentials.json file for the expected format.
+        The credentials file should be stored securely and not shared publicly. 
+        Ideally this instead should be handled using ssh keys, but for simplicity this implementation uses a credentials file with username and password.
+
     - If `files="all"`, the entire contents of the specified directory are transferred.
 
 *Author: Marc Serrano Altena,*
@@ -66,7 +70,8 @@ import argparse
 from src.utils.output_file_utils import transfer_files_cluster, CLUSTER_BASE_DIR
 import os
 
-CLUSTER_CREDENTIALS_DEFAULT_PATH = os.path.join(os.path.expanduser("~"), ".config", "clusters", "cluster_credentials.json")
+# EDIT THIS PATH TO POINT TO YOUR CLUSTER CREDENTIALS FILE
+CLUSTER_CREDENTIALS_DEFAULT_PATH = "credentials/example_credentials.json"
 
 def main() -> None:
     clusters = ['csm', 'snellius_polymer', 'snellius_cna', 'hipster']
@@ -84,7 +89,7 @@ def main() -> None:
     parser.add_argument('--remote_dir', type=str, default=CLUSTER_BASE_DIR,
                         help='Remote directory on the cluster to use for file transfers. Default is the cluster base directory.')
     parser.add_argument('--cluster_credentials_file', type=str, default=CLUSTER_CREDENTIALS_DEFAULT_PATH,
-                        help='Path to cluster credentials file. Default is ~/.config/clusters/cluster_credentials.json.')
+                        help='Path to cluster credentials file. Default is given by CLUSTER_CREDENTIALS_DEFAULT_PATH.')
     parser.add_argument('--files', nargs='*', default=["all"],
                         help='List of files to transfer. Can be a single file or multiple files. Default is "all", which means all files will be transferred.')
     parser.add_argument('--overwrite', '-o', action='store_true',

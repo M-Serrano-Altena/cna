@@ -18,5 +18,5 @@ singularity exec --nv \
         --noise 0 \
         --line_interrupt 0 \
         --act_threshold 0.7 \
-        --square_factor '1.8 1.9 2.0 2.1 2.2 2.3' \
+        --square_factor 1.8 1.9 2.0 2.1 2.2 2.3 \
         --store_baseline_activations_path "activations/net-fragments_baseline_activations.pt" \

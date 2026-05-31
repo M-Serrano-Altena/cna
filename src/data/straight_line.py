@@ -164,3 +164,90 @@ class StraightLine(Dataset):
 
     def __getitem__(self, idx: int):
         return self.get_item(idx)
+
+
+class UniformSlopeStraightLine(StraightLine):
+    """Straight-line dataset with one precomputed slope per sample.
+
+    Instead of sampling line endpoints randomly for every item, this variant
+    generates a fixed set of line orientations up front, one per requested
+    image, and shuffles the resulting samples. This makes the orientation
+    distribution much closer to uniform for small datasets.
+    """
+
+    def __init__(
+        self,
+        img_h: Optional[int] = 32,
+        img_w: Optional[int] = 32,
+        num_images: Optional[int] = 50,
+        n_black_pixels: Optional[int] = 1,
+        transform: Optional[Callable] = None,
+    ):
+        super().__init__(
+            img_h=img_h,
+            img_w=img_w,
+            num_images=num_images,
+            n_black_pixels=n_black_pixels,
+            transform=transform,
+        )
+        self._uniform_line_coords = self._generate_uniform_line_coords()
+        random.shuffle(self._uniform_line_coords)
+
+    def _line_coords_from_angle(self, angle: float) -> Tuple[Tuple[int, int], Tuple[int, int]]:
+        """Create a line segment through the image center for a given angle."""
+        assert self.img_w is not None and self.img_h is not None
+        img_w = self.img_w
+        img_h = self.img_h
+        cx = (img_w - 1) / 2.0
+        cy = (img_h - 1) / 2.0
+        dx = math.cos(angle)
+        dy = math.sin(angle)
+        eps = 1e-12
+        points = []
+
+        if abs(dx) > eps:
+            for x in (0.0, float(img_w - 1)):
+                y = cy + (x - cx) * (dy / dx)
+                if 0.0 <= y <= float(img_h - 1):
+                    points.append((x, y))
+
+        if abs(dy) > eps:
+            for y in (0.0, float(img_h - 1)):
+                x = cx + (y - cy) * (dx / dy)
+                if 0.0 <= x <= float(img_w - 1):
+                    points.append((x, y))
+
+        unique_points = []
+        for point in points:
+            rounded_point = (int(round(point[0])), int(round(point[1])))
+            if rounded_point not in unique_points:
+                unique_points.append(rounded_point)
+
+        if len(unique_points) < 2:
+            return (0, int(round(cy))), (img_w - 1, int(round(cy)))
+
+        return unique_points[0], unique_points[1]
+
+    def _generate_uniform_line_coords(self) -> list[Tuple[Tuple[int, int], Tuple[int, int]]]:
+        """Generate one line segment per uniformly spaced orientation."""
+        assert self.num_images is not None
+        num_images = self.num_images
+
+        if num_images <= 0:
+            return []
+
+        angles = np.linspace(0.0, math.pi, num=num_images, endpoint=False)
+        return [self._line_coords_from_angle(float(angle)) for angle in angles]
+
+    def get_item(
+        self,
+        idx: int,
+        line_coords: Optional[Tuple[Tuple[int, int], Tuple[int, int]]] = None,
+        n_black_pixels: Optional[int] = 0,
+    ):
+        if line_coords is None:
+            if not self._uniform_line_coords:
+                return super().get_item(idx, line_coords=None, n_black_pixels=n_black_pixels)
+            line_coords = self._uniform_line_coords[idx % len(self._uniform_line_coords)]
+        return super().get_item(idx, line_coords=line_coords, n_black_pixels=n_black_pixels)
+
